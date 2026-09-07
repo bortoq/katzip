@@ -15,10 +15,12 @@
 static const int RAW_WINDOW_BITS = -15;
 static const int ZLIB_MEM_LEVEL = 9;
 
-/* Zopfli iteration budget per size class. */
-static const int ZOPFLI_ITER_TINY = 300;   /* <= 64 KiB */
-static const int ZOPFLI_ITER_SMALL = 60;   /* <= 256 KiB */
-static const int ZOPFLI_ITER_MEDIUM = 30;  /* <= 1 MiB */
+/* Stage 1: full Zopfli grid. Iteration budget per size class.
+   Small files can afford deep search (hours per file at 1000 iters
+   is still bounded because file is small). */
+static const int ZOPFLI_ITER_TINY = 1000;  /* <= 64 KiB */
+static const int ZOPFLI_ITER_SMALL = 200;  /* <= 256 KiB */
+static const int ZOPFLI_ITER_MEDIUM = 60;  /* <= 1 MiB */
 static const int ZOPFLI_ITER_LARGE = 15;   /* > 1 MiB */
 
 /* Minimum size for extra strategy pass on small files. */
@@ -168,9 +170,12 @@ deflate_with_libdeflate (const unsigned char *in, size_t in_len,
 }
 #endif
 
+/* Full Zopfli call with all knobs exposed.
+   split_max == 0 means unlimited blocks. */
 static bool
 deflate_with_zopfli (const unsigned char *in, size_t in_len,
                      int iterations, int split_max,
+                     int do_split, int split_last,
                      unsigned char **out, size_t *out_len)
 {
   ZopfliOptions opts;
@@ -194,7 +199,8 @@ deflate_with_zopfli (const unsigned char *in, size_t in_len,
 
   ZopfliInitOptions (&opts);
   opts.numiterations = iterations;
-  opts.blocksplitting = 1;
+  opts.blocksplitting = do_split;
+  opts.blocksplittinglast = split_last;
   opts.blocksplittingmax = split_max;
 
   /* Zopfli produces raw DEFLATE when asked for DEFLATE format. */
@@ -302,6 +308,8 @@ try_libdeflate_all (const unsigned char *data, size_t len,
 }
 #endif
 
+/* Stage 1: full Zopfli grid — 4 combos of (last, splitmax) plus
+   no-split for tiny files. Keeps the best stream seen. */
 static void
 try_zopfli_max (const unsigned char *data, size_t len,
                 unsigned char **best, size_t *best_len,
@@ -321,20 +329,25 @@ try_zopfli_max (const unsigned char *data, size_t len,
   else
     iter = ZOPFLI_ITER_LARGE;
 
-  {
-    unsigned char *c = NULL;
-    size_t cl = 0;
-    if (deflate_with_zopfli (data, len, iter, 15, &c, &cl))
-      consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                          best, best_len, best_method);
-  }
+  /* Grid: blocksplittinglast {0,1} x splitmax {15,0} = 4 trials. */
+  for (int last = 0; last <= 1; last++)
+    for (int sm = 0; sm < 2; sm++)
+      {
+        int split_max = (sm == 0 ? 15 : 0);
+        unsigned char *c = NULL;
+        size_t cl = 0;
+        if (deflate_with_zopfli (data, len, iter, split_max,
+                                 1, last, &c, &cl))
+          consider_candidate (c, cl, COMP_METHOD_DEFLATE,
+                              best, best_len, best_method);
+      }
 
-  /* Second pass with unlimited blocks only for tiny files. */
+  /* Fifth trial for tiny files: no block splitting at all. */
   if (len <= 64 * 1024)
     {
       unsigned char *c = NULL;
       size_t cl = 0;
-      if (deflate_with_zopfli (data, len, iter, 0, &c, &cl))
+      if (deflate_with_zopfli (data, len, iter, 0, 0, 0, &c, &cl))
         consider_candidate (c, cl, COMP_METHOD_DEFLATE,
                             best, best_len, best_method);
     }
