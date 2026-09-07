@@ -9,6 +9,11 @@
 #define COMP_METHOD_STORE   0
 #define COMP_METHOD_DEFLATE 8
 
+/* Progress callback for smooth single-file indication.
+   pct is 0..100, called from inside long Zopfli runs. */
+typedef void (*competitor_progress_cb)(int pct, void *user);
+void competitor_set_progress_cb(competitor_progress_cb cb, void *user);
+
 /* Choose and compress a buffer with the densest DEFLATE.
    On success returns true and allocates *out (caller must free).
    *method is set to COMP_METHOD_STORE or COMP_METHOD_DEFLATE. */

@@ -10,7 +10,7 @@ print_usage (void)
 {
   fprintf (stderr,
            "KATZip v1.0 \342\200\224 Deflating with extreme devotion.\n"
-           "Dedicated to the memory of Phil Katz (1962\342\200\2232000), the father of ZIP.\n"
+           "Dedicated to the memory of Phil Katz (1962-2000), the father of ZIP.\n"
            "\n"
            "Usage:   katzip <archive.zip> <input_files...>\n"
            "Example: katzip APPNOTE APPNOTE.TXT\n");

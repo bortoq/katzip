@@ -24,6 +24,9 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
 #include <stdio.h>
 
 #include "blocksplitter.h"
+
+/* Progress hook for katzip smooth single-file mode. */
+extern void zopfli_report_iter(int iter, int total);
 #include "deflate.h"
 #include "symbols.h"
 #include "tree.h"
@@ -484,6 +487,7 @@ void ZopfliLZ77Optimal(ZopfliBlockState *s,
   /* Repeat statistics with each time the cost model from the previous stat
   run. */
   for (i = 0; i < numiterations; i++) {
+    zopfli_report_iter(i, numiterations);
     ZopfliCleanLZ77Store(&currentstore);
     ZopfliInitLZ77Store(in, &currentstore);
     LZ77OptimalRun(s, in, instart, inend, &path, &pathsize,

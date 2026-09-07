@@ -50,6 +50,21 @@ write_le64 (FILE *f, uint64_t v)
     }
 }
 
+/* Progress for single-file smooth mode (block-wise).
+   Only prints when percentage actually changes to avoid spam. */
+static int g_last_pct = -1;
+
+static void
+single_file_progress_cb (int pct, void *user)
+{
+  (void) user;
+  if (pct == g_last_pct)
+    return;
+  g_last_pct = pct;
+  fprintf (stderr, "%d%%\r", pct);
+  fflush (stderr);
+}
+
 /* Check if a filename needs the UTF-8 flag. */
 static bool
 needs_utf8 (const char *s)
@@ -783,14 +798,29 @@ create_zip_archive (const char *archive,
       return false;
     }
 
-  /* Second pass: compress each file with progress. */
+  /* Second pass: compress each file with progress.
+     For a single file show block-wise progress via callback,
+     otherwise per-file progress. */
+  bool single_file = (nitems == 1);
+  if (single_file)
+    {
+      g_last_pct = -1;
+      competitor_set_progress_cb (single_file_progress_cb, NULL);
+    }
+
   for (i = 0; i < nitems; i++)
     {
-      int pct = (int) ((i + 1) * 100 / nitems);
-
-      /* Show overall progress on the same line. */
-      fprintf (stderr, "%d%%\r", pct);
-      fflush (stderr);
+      if (!single_file)
+        {
+          int pct = (int) ((i + 1) * 100 / nitems);
+          fprintf (stderr, "%d%%\r", pct);
+          fflush (stderr);
+        }
+      else
+        {
+          fprintf (stderr, "0%%\r");
+          fflush (stderr);
+        }
 
       if (!zip_writer_add_path (&writer,
                                 items[i].arcname,
@@ -800,6 +830,9 @@ create_zip_archive (const char *archive,
           break;
         }
     }
+
+  if (single_file)
+    competitor_set_progress_cb (NULL, NULL);
 
   /* Free the collected list (writer keeps its own copies). */
   for (i = 0; i < nitems; i++)

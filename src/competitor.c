@@ -12,6 +12,39 @@
 
 #include "zopfli/zopfli.h"
 
+/* Progress callback for smooth single-file indication. */
+competitor_progress_cb g_progress_cb = NULL;
+void *g_progress_user = NULL;
+int g_progress_base = 0;
+int g_progress_range = 100;
+
+void
+competitor_set_progress_cb (competitor_progress_cb cb, void *user)
+{
+  g_progress_cb = cb;
+  g_progress_user = user;
+}
+
+void
+report_progress (int pct)
+{
+  if (g_progress_cb)
+    g_progress_cb (pct, g_progress_user);
+}
+
+/* Called from Zopfli per iteration for smooth single-file progress. */
+void
+zopfli_report_iter (int iter, int total)
+{
+  if (!g_progress_cb || total <= 0)
+    return;
+  int pct = g_progress_base + iter * g_progress_range / total;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  g_progress_cb (pct, g_progress_user);
+}
+
+
 /* Raw DEFLATE window in zlib: negative means no zlib header. */
 static const int RAW_WINDOW_BITS = -15;
 static const int ZLIB_MEM_LEVEL = 9;
@@ -366,23 +399,36 @@ try_zopfli_max (const unsigned char *data, size_t len,
     return;
 
   if (len <= 64 * 1024)
-    iter = 1000;
+    iter = ZOPFLI_ITER_TINY;
   else if (len <= 256 * 1024)
-    iter = 200;
+    iter = ZOPFLI_ITER_SMALL;
   else if (len <= 1024 * 1024)
-    iter = 60;
+    iter = ZOPFLI_ITER_MEDIUM;
   else
-    iter = 15;
+    iter = ZOPFLI_ITER_LARGE;
 
-  /* Grid: blocksplittinglast {0,1} x splitmax {15,0} = 4 trials. */
-  for (int last = 0; last <= 1; last++)
-    for (int sm = 0; sm < 2; sm++)
-      {
-        int split_max = (sm == 0 ? 15 : 0);
-        unsigned char *c = NULL;
-        size_t cl = 0;
-        if (deflate_with_zopfli (data, len, iter, split_max,
-                                 1, last, &c, &cl))
+  /* Grid: blocksplittinglast {0,1} x splitmax {15,0} = 4 trials.
+     Progress for single-file smooth mode: each trial covers
+     an equal slice of the Zopfli phase. */
+  {
+    int saved_base = g_progress_base;
+    int saved_range = g_progress_range;
+    int n_trials = (len <= 64 * 1024) ? 5 : 4;
+    for (int last = 0; last <= 1; last++)
+      for (int sm = 0; sm < 2; sm++)
+        {
+          int trial_idx = last * 2 + sm;
+          int trial_base = saved_base + trial_idx * saved_range / n_trials;
+          int trial_range = saved_range / n_trials;
+          g_progress_base = trial_base;
+          g_progress_range = trial_range;
+
+          int split_max = (sm == 0 ? 15 : 0);
+          unsigned char *c = NULL;
+          size_t cl = 0;
+          report_progress (trial_base);
+          if (deflate_with_zopfli (data, len, iter, split_max,
+                                   1, last, &c, &cl))
           {
             char desc[128];
             snprintf (desc, sizeof desc,
@@ -392,20 +438,25 @@ try_zopfli_max (const unsigned char *data, size_t len,
                                 best, best_len, best_method, best_desc, 256);
           }
       }
-
-  /* Fifth trial for tiny files: no block splitting at all. */
-  if (len <= 64 * 1024)
-    {
-      unsigned char *c = NULL;
-      size_t cl = 0;
-      if (deflate_with_zopfli (data, len, iter, 0, 0, 0, &c, &cl))
+      /* Fifth trial for tiny files: no block splitting at all. */
+      if (len <= 64 * 1024)
         {
-          char desc[128];
-          snprintf (desc, sizeof desc,
-                    "Deflate Zopfli iter %d nosplit", iter);
-          consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
-                              best, best_len, best_method, best_desc, 256);
+          int trial_base = saved_base + 4 * saved_range / n_trials;
+          g_progress_base = trial_base;
+          g_progress_range = saved_range / n_trials;
+          report_progress (trial_base);
+          unsigned char *c = NULL;
+          size_t cl = 0;
+          if (deflate_with_zopfli (data, len, iter, 0, 0, 0, &c, &cl))
+            {
+              char desc[128];
+              snprintf (desc, sizeof desc,
+                        "Deflate Zopfli iter %d nosplit", iter);
+              consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                                  best, best_len, best_method, best_desc, 256);
+            }
         }
+      report_progress (saved_base + saved_range);
     }
 }
 
@@ -456,6 +507,10 @@ competitor_compress (const unsigned char *data, size_t len,
   best_len = len;
   best_method = COMP_METHOD_STORE;
   best = NULL;
+
+  /* Initialize progress range for this file (archiver may override). */
+  g_progress_base = 0;
+  g_progress_range = 100;
 
   try_zlib_exhaustive (data, len, &best, &best_len, &best_method, best_desc);
 
