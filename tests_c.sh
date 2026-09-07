@@ -42,12 +42,11 @@ echo "small text: OK"
 mkdir -p $TMP/src
 echo "text data text data text data" > $TMP/src/a.txt
 head -c 10000 /dev/urandom > $TMP/src/b.bin
-cp c_src/policy.c $TMP/src/c.jpg
+cp src/policy.c $TMP/src/c.jpg
 ./katzip $TMP/dir $TMP/src
 unzip -t $TMP/dir.zip | grep -q "No errors"
 7z l $TMP/dir.zip >/dev/null
 python3 -c "import zipfile; z=zipfile.ZipFile('$TMP/dir.zip'); assert len([n for n in z.namelist() if not n.endswith('/')])==3"
-# invariant: only Store/Deflate/BZIP2 (unzip-readable)
 python3 -c "
 import zipfile
 z=zipfile.ZipFile('$TMP/dir.zip')
@@ -61,9 +60,9 @@ echo "directory: OK"
 python3 -c "import zipfile; p='$TMP/jpg.zip'; z=zipfile.ZipFile(p); i=z.getinfo(z.namelist()[0]); assert i.compress_type==0, 'jpg should be stored'"
 echo "incompressible: OK"
 
-# 7. COMPRESSION REGRESSION: katzip must beat zip -9 and 7z -mx9 (kzip-class target)
+# 7. COMPRESSION REGRESSION: katzip must beat zip -9 and 7z -mx9
 python3 -c "open('$TMP/text.txt','w').write('Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor. '*2000)"
-cp c_src/competitor.c $TMP/code.c
+cp src/competitor.c $TMP/code.c
 ./katzip $TMP/kz_text $TMP/text.txt
 ./katzip $TMP/kz_code $TMP/code.c
 rm -f $TMP/std_text.zip && zip -9 -j $TMP/std_text.zip $TMP/text.txt >/dev/null
@@ -89,12 +88,5 @@ echo "regression: OK"
 CNT=$(strace -f -e execve ./katzip $TMP/strace $TMP/b.txt 2>&1 | grep -c "execve")
 if [ "$CNT" -gt 1 ]; then echo "FAIL: calls external"; exit 1; fi
 echo "no external calls: OK"
-
-# 9. compare with python katzip
-python3 -m maxzip.cli $TMP/py $TMP/code.c
-test -f $TMP/py.zip
-unzip -t $TMP/py.zip | grep -q "No errors"
-7z l $TMP/py.zip >/dev/null
-echo "python compat: OK"
 
 echo "ALL C TESTS PASSED"

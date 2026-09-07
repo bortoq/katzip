@@ -1,44 +1,54 @@
-# katzip — ZIP архиватор с максимальным сжатием (DEFLATE-only)
+# katzip — Maximum Compression ZIP Archiver (DEFLATE-only)
 
-Реализация по `roadmap.md` (самый плотный режим `-4`). Создаёт `.zip` меньше чем `zip -9` / `7z -mx=9` / `kzip` за счёт конкурса DEFLATE-энкодеров на каждый файл. **Только методы Store(0)/Deflate(8)** — честный бой с kzip (тоже deflate-only) и 100% совместимость: `unzip` + Python `zipfile` + 7-Zip + Explorer + macOS. **Самостоятельная программа на C, не вызывает внешние утилиты** (проверено `strace`). Если расширение `.zip` пропущено, добавляется автоматически.
+A standalone C tool that creates smaller `.zip` files than `zip -9`, `7z -mx=9` or `kzip`.
+It tries every DEFLATE encoder on each file and keeps the smallest result.
+Only Store (0) and Deflate (8) are used — so archives open everywhere
+(`unzip`, Python `zipfile`, 7-Zip, Windows Explorer, macOS).
 
-## Сборка (C)
+If the output name has no `.zip` extension, it is added automatically.
+
+## Build
 
 ```bash
-make          # -> ./katzip (динамический, требует libz/liblzma/libzstd/libdeflate)
-make static   # -> ./katzip_static (статический, без зависимостей)
-./katzip --help
+make              # builds ./katzip (needs libz + libdeflate)
+make static       # builds ./katzip_static (no shared libs)
+./katzip --help   # Usage: katzip <archive.zip> <files...>
 ```
 
-Зависимости для сборки: `gcc`, `zlib1g-dev`, `liblzma-dev`, `libzstd-dev`, `libdeflate-dev` (опционально `libbz2-dev`). Авто-детект в Makefile.
+Build needs: `gcc`, `zlib1g-dev`, `libdeflate-dev` (optional, for even smaller files).
+Zopfli source is vendored in `third_party/zopfli` and built together — no extra install.
 
-## Использование
+## Use
 
 ```bash
 katzip <archive.zip> <files...>
 Example: katzip archive file.txt
-# Пример:
-katzip mydocs README.md src/
-# создаст mydocs.zip если указано mydocs без расширения
 
-# Python версия (аналог):
-python -m maxzip.cli archive file.txt
+# Examples:
+katzip docs README.md src/        # creates docs.zip if name has no .zip
+katzip backup.zip image.png notes.txt
+
+# Check:
+unzip -l backup.zip
+7z l backup.zip
 ```
 
-Проверка:
+## How it works
+
+* `src/policy.*` — skip already compressed files (jpg, mp4, zip, ...), high entropy check, size limits.
+* `src/competitor.*` — competition: `zlib` (levels and strategies) + `libdeflate` (1..12) + Zopfli (max). The smallest valid DEFLATE wins. BZIP2, LZMA, ZSTD and PPMd are not used — deflate only, like kzip, for a fair comparison.
+* `src/archiver.*` — writes ZIP by hand (local file, central directory, EOCD, Zip64 when needed), UTF-8, CRC32.
+* `src/main.c` — very small CLI with auto `.zip` handling.
+* `third_party/zopfli` — Google Zopfli, Apache 2.0.
+
+## Test
+
 ```bash
-katzip archive file.txt
-unzip -l archive.zip
-7z l archive.zip
-make test && python -m pytest -q
+make test   # builds katzip and runs ./tests_c.sh
 ```
 
-## Архитектура
+Tests check help text, auto extension, empty files, directories, incompressible files, that `katzip` beats `zip -9` and `7z -mx=9` on text and code, and that no external programs are called.
 
-- `c_src/policy.{h,c}` — эвристики (§3.4): skip по расширению, энтропия >7.85, пороги 4KB/32MB
-- `c_src/competitor.{h,c}` — конкурс DEFLATE (§5.3, §8): `zlib(уровни×стратегии) + libdeflate(1..12) + Zopfli(max)` → минимум, проверка `inflate==orig`; BZIP2/LZMA/ZSTD/PPMd НЕ используются при сжатии (только Deflate — как kzip)
-- `c_src/archiver.{h,c}` — manual ZIP writer (Store/Deflate/BZIP2/LZMA/ZSTD), Zip64, UTF-8, CRC32
-- `c_src/main.c` — CLI `katzip <archive.zip> <files...>` (только самый плотный режим, авто `.zip`)
-- `maxzip/*.py` — Python референс
+## License
 
-Лицензии: `libdeflate MIT`, `zopfli Apache-2.0`, `zstd BSD`, `bzip2 BSD`, `LZMA public domain`, код проекта MIT.
+Project code MIT. Vendored Zopfli Apache 2.0, libdeflate MIT.
