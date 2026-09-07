@@ -1,0 +1,13 @@
+# build
+*.o
+katzip
+katzip_static
+maxzip_c
+maxzip_static
+__pycache__/
+.pytest_cache/
+*.pyc
+# temp
+/tmp/
+# archives
+*.zip
