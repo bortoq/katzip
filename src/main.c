@@ -9,8 +9,11 @@ static void
 print_usage (void)
 {
   fprintf (stderr,
-           "Usage: katzip <archive.zip> <files...>\n"
-           "Example: katzip archive file.txt\n");
+           "KATZip v1.0 \342\200\224 Deflating with extreme devotion.\n"
+           "Dedicated to the memory of Phil Katz (1962\342\200\2232000), the father of ZIP.\n"
+           "\n"
+           "Usage:   katzip <archive.zip> <input_files...>\n"
+           "Example: katzip APPNOTE APPNOTE.TXT\n");
 }
 
 /* Append .zip if missing (case-insensitive). Caller must free. */

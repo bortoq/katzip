@@ -553,12 +553,17 @@ zip_writer_free (zip_writer_t *writer)
 }
 
 /* ------------------------------------------------------------------ */
-/* High-level: walk files and directories */
+/* High-level: collect all files first for accurate progress */
+
+typedef struct
+{
+  char *arcname;
+  char *fullpath;
+} file_item_t;
 
 static bool
-add_recursively (zip_writer_t *writer,
-                 const char *path,
-                 const char *base_parent)
+collect_one (const char *path, const char *base_parent,
+             file_item_t **items, size_t *count, size_t *cap)
 {
   struct stat st;
 
@@ -583,7 +588,7 @@ add_recursively (zip_writer_t *writer,
             continue;
 
           snprintf (full, sizeof full, "%s/%s", path, ent->d_name);
-          if (!add_recursively (writer, full, base_parent))
+          if (!collect_one (full, base_parent, items, count, cap))
             {
               closedir (dir);
               return false;
@@ -598,6 +603,8 @@ add_recursively (zip_writer_t *writer,
       char arc[4096];
       const char *rel;
       size_t blen = strlen (base_parent);
+      char *a_dup;
+      char *p_dup;
 
       if (blen == 0 || strcmp (base_parent, ".") == 0)
         rel = path;
@@ -617,7 +624,29 @@ add_recursively (zip_writer_t *writer,
         if (*p == '\\')
           *p = '/';
 
-      return zip_writer_add_path (writer, arc, path);
+      if (*count >= *cap)
+        {
+          size_t ncap = *cap ? *cap * 2 : 16;
+          file_item_t *next = realloc (*items, ncap * sizeof *next);
+          if (!next)
+            return false;
+          *items = next;
+          *cap = ncap;
+        }
+
+      a_dup = strdup (arc);
+      p_dup = strdup (path);
+      if (!a_dup || !p_dup)
+        {
+          free (a_dup);
+          free (p_dup);
+          return false;
+        }
+
+      (*items)[*count].arcname = a_dup;
+      (*items)[*count].fullpath = p_dup;
+      (*count)++;
+      return true;
     }
 }
 
@@ -627,15 +656,17 @@ create_zip_archive (const char *archive,
                     size_t nfiles)
 {
   zip_writer_t writer;
+  file_item_t *items = NULL;
+  size_t nitems = 0;
+  size_t cap = 0;
   size_t i;
   bool ok = true;
+  size_t total_comp = 0;
 
   if (!archive || !files || nfiles == 0)
     return false;
 
-  if (!zip_writer_open (&writer, archive))
-    return false;
-
+  /* First pass: collect every regular file. */
   for (i = 0; i < nfiles; i++)
     {
       const char *p = files[i];
@@ -676,7 +707,7 @@ create_zip_archive (const char *archive,
           else
             strcpy (parent, ".");
 
-          if (!add_recursively (&writer, p, parent))
+          if (!collect_one (p, parent, &items, &nitems, &cap))
             {
               ok = false;
               break;
@@ -686,16 +717,124 @@ create_zip_archive (const char *archive,
         {
           const char *base = strrchr (p, '/');
           const char *arc = base ? base + 1 : p;
-          if (!zip_writer_add_path (&writer, arc, p))
+          char *a_dup = strdup (arc);
+          char *p_dup = strdup (p);
+
+          if (!a_dup || !p_dup)
             {
+              free (a_dup);
+              free (p_dup);
               ok = false;
               break;
             }
+
+          if (nitems >= cap)
+            {
+              size_t ncap = cap ? cap * 2 : 16;
+              file_item_t *next = realloc (items, ncap * sizeof *next);
+              if (!next)
+                {
+                  free (a_dup);
+                  free (p_dup);
+                  ok = false;
+                  break;
+                }
+              items = next;
+              cap = ncap;
+            }
+
+          items[nitems].arcname = a_dup;
+          items[nitems].fullpath = p_dup;
+          nitems++;
         }
     }
 
+  if (!ok)
+    {
+      for (i = 0; i < nitems; i++)
+        {
+          free (items[i].arcname);
+          free (items[i].fullpath);
+        }
+      free (items);
+      return false;
+    }
+
+  if (nitems == 0)
+    {
+      free (items);
+      if (!zip_writer_open (&writer, archive))
+        return false;
+      ok = zip_writer_close (&writer);
+      zip_writer_free (&writer);
+      if (!ok)
+        unlink (archive);
+      return ok;
+    }
+
+  if (!zip_writer_open (&writer, archive))
+    {
+      for (i = 0; i < nitems; i++)
+        {
+          free (items[i].arcname);
+          free (items[i].fullpath);
+        }
+      free (items);
+      return false;
+    }
+
+  /* Second pass: compress each file with progress. */
+  for (i = 0; i < nitems; i++)
+    {
+      int pct = (int) ((i + 1) * 100 / nitems);
+
+      /* Show overall progress on the same line. */
+      fprintf (stderr, "%d%%\r", pct);
+      fflush (stderr);
+
+      if (!zip_writer_add_path (&writer,
+                                items[i].arcname,
+                                items[i].fullpath))
+        {
+          ok = false;
+          break;
+        }
+    }
+
+  /* Free the collected list (writer keeps its own copies). */
+  for (i = 0; i < nitems; i++)
+    {
+      free (items[i].arcname);
+      free (items[i].fullpath);
+    }
+  free (items);
+
   if (ok)
-    ok = zip_writer_close (&writer);
+    {
+      /* Total compressed data without ZIP overhead. */
+      for (i = 0; i < writer.count; i++)
+        total_comp += writer.entries[i].comp_len;
+
+      ok = zip_writer_close (&writer);
+    }
+
+  /* Final line overwrites the progress line via \r. */
+  if (ok)
+    {
+      const char *best = competitor_best_overall_desc ();
+      if (!best || !*best)
+        best = competitor_last_desc ();
+      if (!best || !*best)
+        best = "Deflate";
+
+      fprintf (stderr, "\r%s %zu bytes\n", best, total_comp);
+      fflush (stderr);
+    }
+  else
+    {
+      fprintf (stderr, "\n");
+      fflush (stderr);
+    }
 
   zip_writer_free (&writer);
 

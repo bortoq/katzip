@@ -1,6 +1,7 @@
 #include "competitor.h"
 #include "policy.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -25,6 +26,30 @@ static const int ZOPFLI_ITER_LARGE = 15;   /* > 1 MiB */
 
 /* Minimum size for extra strategy pass on small files. */
 static const size_t SMALL_FILE_EXTRA_PASS = 64 * 1024;
+
+/* Last winning encoder description (for final report). */
+static char g_last_desc[256] = "Store";
+static char g_best_overall_desc[256] = "Store";
+static size_t g_best_overall_saved = 0;
+
+const char *
+competitor_last_desc (void)
+{
+  return g_last_desc;
+}
+
+/* For final archive summary. */
+const char *
+competitor_best_overall_desc (void)
+{
+  return g_best_overall_desc;
+}
+
+size_t
+competitor_best_overall_saved (void)
+{
+  return g_best_overall_saved;
+}
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                     */
@@ -224,10 +249,12 @@ deflate_with_zopfli (const unsigned char *in, size_t in_len,
   return true;
 }
 
-/* Keep the smallest buffer seen so far. */
+/* Keep the smallest buffer seen so far, with description. */
 static void
 consider_candidate (unsigned char *cand, size_t cand_len, int cand_method,
-                    unsigned char **best, size_t *best_len, int *best_method)
+                    const char *cand_desc,
+                    unsigned char **best, size_t *best_len,
+                    int *best_method, char *best_desc, size_t desc_sz)
 {
   if (!cand)
     return;
@@ -239,6 +266,11 @@ consider_candidate (unsigned char *cand, size_t cand_len, int cand_method,
       *best = cand;
       *best_len = cand_len;
       *best_method = cand_method;
+      if (cand_desc && best_desc)
+        {
+          strncpy (best_desc, cand_desc, desc_sz - 1);
+          best_desc[desc_sz - 1] = '\0';
+        }
     }
   else
     free (cand);
@@ -250,7 +282,7 @@ consider_candidate (unsigned char *cand, size_t cand_len, int cand_method,
 static void
 try_zlib_exhaustive (const unsigned char *data, size_t len,
                      unsigned char **best, size_t *best_len,
-                     int *best_method)
+                     int *best_method, char *best_desc)
 {
   const int strategies[] =
     { Z_DEFAULT_STRATEGY, Z_FILTERED, Z_HUFFMAN_ONLY,
@@ -266,15 +298,18 @@ try_zlib_exhaustive (const unsigned char *data, size_t len,
           unsigned char *c = NULL;
           size_t cl = 0;
           if (deflate_with_zlib (data, len, 9, strategies[i], &c, &cl))
-            consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                                best, best_len, best_method);
+            {
+              char desc[96];
+              snprintf (desc, sizeof desc,
+                        "Deflate zlib level 9 strategy %d", strategies[i]);
+              consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                                  best, best_len, best_method, best_desc, 256);
+            }
         }
       return;
     }
 
-  /* Small and medium files: try all levels and strategies.
-     RLE and FIXED only matter at max level, so skip them otherwise
-     to save time. */
+  /* Small and medium files: try all levels and strategies. */
   for (int lvl = 1; lvl <= 9; lvl++)
     for (i = 0; i < n_strat; i++)
       {
@@ -285,8 +320,13 @@ try_zlib_exhaustive (const unsigned char *data, size_t len,
           unsigned char *c = NULL;
           size_t cl = 0;
           if (deflate_with_zlib (data, len, lvl, strategies[i], &c, &cl))
-            consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                                best, best_len, best_method);
+            {
+              char desc[96];
+              snprintf (desc, sizeof desc,
+                        "Deflate zlib level %d strategy %d", lvl, strategies[i]);
+              consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                                  best, best_len, best_method, best_desc, 256);
+            }
         }
       }
 }
@@ -295,15 +335,20 @@ try_zlib_exhaustive (const unsigned char *data, size_t len,
 static void
 try_libdeflate_all (const unsigned char *data, size_t len,
                     unsigned char **best, size_t *best_len,
-                    int *best_method)
+                    int *best_method, char *best_desc)
 {
   for (int lvl = 1; lvl <= 12; lvl++)
     {
       unsigned char *c = NULL;
       size_t cl = 0;
       if (deflate_with_libdeflate (data, len, lvl, &c, &cl))
-        consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                            best, best_len, best_method);
+        {
+          char desc[96];
+          snprintf (desc, sizeof desc,
+                    "Deflate libdeflate level %d", lvl);
+          consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                              best, best_len, best_method, best_desc, 256);
+        }
     }
 }
 #endif
@@ -313,7 +358,7 @@ try_libdeflate_all (const unsigned char *data, size_t len,
 static void
 try_zopfli_max (const unsigned char *data, size_t len,
                 unsigned char **best, size_t *best_len,
-                int *best_method)
+                int *best_method, char *best_desc)
 {
   int iter;
 
@@ -321,13 +366,13 @@ try_zopfli_max (const unsigned char *data, size_t len,
     return;
 
   if (len <= 64 * 1024)
-    iter = ZOPFLI_ITER_TINY;
+    iter = 1000;
   else if (len <= 256 * 1024)
-    iter = ZOPFLI_ITER_SMALL;
+    iter = 200;
   else if (len <= 1024 * 1024)
-    iter = ZOPFLI_ITER_MEDIUM;
+    iter = 60;
   else
-    iter = ZOPFLI_ITER_LARGE;
+    iter = 15;
 
   /* Grid: blocksplittinglast {0,1} x splitmax {15,0} = 4 trials. */
   for (int last = 0; last <= 1; last++)
@@ -338,8 +383,14 @@ try_zopfli_max (const unsigned char *data, size_t len,
         size_t cl = 0;
         if (deflate_with_zopfli (data, len, iter, split_max,
                                  1, last, &c, &cl))
-          consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                              best, best_len, best_method);
+          {
+            char desc[128];
+            snprintf (desc, sizeof desc,
+                      "Deflate Zopfli iter %d splitmax %d last %d",
+                      iter, split_max, last);
+            consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                                best, best_len, best_method, best_desc, 256);
+          }
       }
 
   /* Fifth trial for tiny files: no block splitting at all. */
@@ -348,8 +399,13 @@ try_zopfli_max (const unsigned char *data, size_t len,
       unsigned char *c = NULL;
       size_t cl = 0;
       if (deflate_with_zopfli (data, len, iter, 0, 0, 0, &c, &cl))
-        consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                            best, best_len, best_method);
+        {
+          char desc[128];
+          snprintf (desc, sizeof desc,
+                    "Deflate Zopfli iter %d nosplit", iter);
+          consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                              best, best_len, best_method, best_desc, 256);
+        }
     }
 }
 
@@ -364,9 +420,13 @@ competitor_compress (const unsigned char *data, size_t len,
   unsigned char *best = NULL;
   size_t best_len;
   int best_method;
+  char best_desc[256];
 
   if (!data || !out || !out_len || !method)
     return false;
+
+  strncpy (best_desc, "Store", sizeof best_desc);
+  best_desc[sizeof best_desc - 1] = '\0';
 
   if (len == 0)
     {
@@ -376,6 +436,7 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = 0;
       *method = COMP_METHOD_STORE;
+      strncpy (g_last_desc, "Store", sizeof g_last_desc);
       return true;
     }
 
@@ -388,6 +449,7 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = len;
       *method = COMP_METHOD_STORE;
+      strncpy (g_last_desc, "Store", sizeof g_last_desc);
       return true;
     }
 
@@ -395,10 +457,10 @@ competitor_compress (const unsigned char *data, size_t len,
   best_method = COMP_METHOD_STORE;
   best = NULL;
 
-  try_zlib_exhaustive (data, len, &best, &best_len, &best_method);
+  try_zlib_exhaustive (data, len, &best, &best_len, &best_method, best_desc);
 
 #ifdef HAVE_LIBDEFLATE
-  try_libdeflate_all (data, len, &best, &best_len, &best_method);
+  try_libdeflate_all (data, len, &best, &best_len, &best_method, best_desc);
 #endif
 
   /* Extra strategy for very small files mimics AdvanceCOMP retry. */
@@ -407,11 +469,15 @@ competitor_compress (const unsigned char *data, size_t len,
       unsigned char *c = NULL;
       size_t cl = 0;
       if (deflate_with_zlib (data, len, 6, Z_DEFAULT_STRATEGY, &c, &cl))
-        consider_candidate (c, cl, COMP_METHOD_DEFLATE,
-                            &best, &best_len, &best_method);
+        {
+          char desc[96];
+          snprintf (desc, sizeof desc, "Deflate zlib level 6 strategy 0");
+          consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                              &best, &best_len, &best_method, best_desc, 256);
+        }
     }
 
-  try_zopfli_max (data, len, &best, &best_len, &best_method);
+  try_zopfli_max (data, len, &best, &best_len, &best_method, best_desc);
 
   /* If nothing beat the original size, store. */
   if (!best || best_len >= len)
@@ -429,12 +495,25 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = len;
       *method = COMP_METHOD_STORE;
+      strncpy (g_last_desc, "Store", sizeof g_last_desc);
       return true;
     }
 
   *out = best;
   *out_len = best_len;
   *method = best_method;
+  strncpy (g_last_desc, best_desc, sizeof g_last_desc);
+
+  /* Track overall best for final summary (largest saving). */
+  {
+    size_t saved = len > best_len ? len - best_len : 0;
+    if (saved > g_best_overall_saved)
+      {
+        g_best_overall_saved = saved;
+        strncpy (g_best_overall_desc, best_desc, sizeof g_best_overall_desc);
+      }
+  }
+
   return true;
 }
 

@@ -19,6 +19,14 @@ bool competitor_compress (const unsigned char *data,
                           size_t *out_len,
                           int *method);
 
+/* Human-readable description of the winning encoder for the last
+   call to competitor_compress. Valid until next call. */
+const char *competitor_last_desc (void);
+
+/* Description of the best overall saving seen so far. */
+const char *competitor_best_overall_desc (void);
+size_t competitor_best_overall_saved (void);
+
 /* Verify a compressed buffer by decompressing it. */
 bool competitor_decompress (const unsigned char *comp,
                             size_t comp_len,

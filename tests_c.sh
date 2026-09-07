@@ -5,8 +5,8 @@ TMP=$(mktemp -d)
 trap "rm -rf $TMP" EXIT
 
 # 1. help
-./katzip --help 2>&1 | grep -q "Usage: katzip"
-./katzip 2>&1 | grep -q "Usage: katzip"
+./katzip --help 2>&1 | grep -q "Usage:.*katzip"
+./katzip 2>&1 | grep -q "Usage:.*katzip"
 echo "help: OK"
 
 # 2. auto .zip extension
