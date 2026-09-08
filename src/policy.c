@@ -1,22 +1,9 @@
 #include "policy.h"
+#include "config.h"
 
 #include <math.h>
 #include <string.h>
 #include <strings.h>
-
-/* Already compressed media and archives.
-   PDF is intentionally not listed: many PDFs are text and compress well. */
-static const char *skip_extensions[] =
-  {
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
-    ".mp4", ".mkv", ".avi", ".mov", ".mp3", ".ogg", ".flac",
-    ".zip", ".gz", ".bz2", ".xz", ".7z", ".zst", ".rar",
-    ".woff", ".woff2", ".mpg", ".mpeg", ".webm", ".opus",
-    NULL
-  };
-
-/* Maximum bytes sampled for entropy estimation. */
-static const size_t ENTROPY_SAMPLE_LIMIT = 32768;
 
 bool
 policy_is_incompressible_extension (const char *filename)
@@ -31,8 +18,13 @@ policy_is_incompressible_extension (const char *filename)
   if (!dot)
     return false;
 
-  for (i = 0; skip_extensions[i] != NULL; i++)
-    if (strcasecmp (dot, skip_extensions[i]) == 0)
+  const katzip_config_t *cfg = config_get ();
+
+  if (!cfg)
+    return false;
+  /* Config entries carry no leading dot (stripped at load). */
+  for (i = 0; i < cfg->n_skip_ext; i++)
+    if (strcasecmp (dot + 1, cfg->skip_ext[i]) == 0)
       return true;
 
   return false;
@@ -46,10 +38,15 @@ policy_entropy (const unsigned char *data, size_t len)
   size_t i;
   double entropy = 0.0;
 
+  const katzip_config_t *cfg = config_get ();
+  size_t sample = cfg ? cfg->entropy_sample : 32768;
+
   if (!data || len == 0)
     return 0.0;
 
-  n = len > ENTROPY_SAMPLE_LIMIT ? ENTROPY_SAMPLE_LIMIT : len;
+  if (sample == 0)
+    sample = 32768;
+  n = len > sample ? sample : len;
 
   for (i = 0; i < n; i++)
     freq[data[i]]++;
@@ -70,10 +67,14 @@ policy_entropy (const unsigned char *data, size_t len)
 bool
 policy_is_high_entropy (const unsigned char *data, size_t len)
 {
+  const katzip_config_t *cfg = config_get ();
+
   if (!data || len < 256)
     return false;
+  if (!cfg)
+    return policy_entropy (data, len) > 7.85;
 
-  return policy_entropy (data, len) > POLICY_ENTROPY_LIMIT;
+  return policy_entropy (data, len) > cfg->entropy_limit;
 }
 
 bool
@@ -85,8 +86,12 @@ policy_should_store_only (const char *filename,
     return true;
   if (len == 0)
     return true;
+  const katzip_config_t *cfg = config_get ();
+
   if (policy_is_incompressible_extension (filename))
     return true;
+  if (cfg && !cfg->store_high_entropy)
+    return false;
   if (policy_is_high_entropy (data, len))
     return true;
 
@@ -96,11 +101,15 @@ policy_should_store_only (const char *filename,
 bool
 policy_zopfli_allowed (const unsigned char *data, size_t len)
 {
+  const katzip_config_t *cfg = config_get ();
+
   if (!data)
     return false;
-  if (len < POLICY_SMALL_FILE_LIMIT)
+  if (!cfg)
+    return len >= 4096 && len <= 32UL * 1024UL * 1024UL;
+  if (len < cfg->small_file_limit)
     return false;
-  if (len > POLICY_ZOPFLI_SIZE_LIMIT)
+  if (len > cfg->zopfli_size_limit)
     return false;
 
   return true;

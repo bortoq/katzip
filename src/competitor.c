@@ -1,5 +1,7 @@
 #include "competitor.h"
 #include "policy.h"
+#include "enhanced.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +18,10 @@
 competitor_progress_cb g_progress_cb = NULL;
 void *g_progress_user = NULL;
 int g_progress_base = 0;
-int g_progress_range = 100;
+int g_progress_range = 80;
+/* Highest pct already reported for the current file: trials restart their
+   own iteration counters, so raw values would jump backwards. Clamp. */
+static int g_progress_max = 0;
 
 void
 competitor_set_progress_cb (competitor_progress_cb cb, void *user)
@@ -28,8 +33,17 @@ competitor_set_progress_cb (competitor_progress_cb cb, void *user)
 void
 report_progress (int pct)
 {
-  if (g_progress_cb)
-    g_progress_cb (pct, g_progress_user);
+  if (!g_progress_cb)
+    return;
+  if (pct < 0)
+    pct = 0;
+  if (pct > 100)
+    pct = 100;
+  if (pct < g_progress_max)
+    pct = g_progress_max;
+  else
+    g_progress_max = pct;
+  g_progress_cb (pct, g_progress_user);
 }
 
 /* Called from Zopfli per iteration for smooth single-file progress. */
@@ -41,6 +55,10 @@ zopfli_report_iter (int iter, int total)
   int pct = g_progress_base + iter * g_progress_range / total;
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
+  if (pct < g_progress_max)
+    pct = g_progress_max;
+  else
+    g_progress_max = pct;
   g_progress_cb (pct, g_progress_user);
 }
 
@@ -49,16 +67,6 @@ zopfli_report_iter (int iter, int total)
 static const int RAW_WINDOW_BITS = -15;
 static const int ZLIB_MEM_LEVEL = 9;
 
-/* Stage 1: full Zopfli grid. Iteration budget per size class.
-   Small files can afford deep search (hours per file at 1000 iters
-   is still bounded because file is small). */
-static const int ZOPFLI_ITER_TINY = 1000;  /* <= 64 KiB */
-static const int ZOPFLI_ITER_SMALL = 200;  /* <= 256 KiB */
-static const int ZOPFLI_ITER_MEDIUM = 60;  /* <= 1 MiB */
-static const int ZOPFLI_ITER_LARGE = 15;   /* > 1 MiB */
-
-/* Minimum size for extra strategy pass on small files. */
-static const size_t SMALL_FILE_EXTRA_PASS = 64 * 1024;
 
 /* Last winning encoder description (for final report). */
 static char g_last_desc[256] = "Store";
@@ -317,24 +325,49 @@ try_zlib_exhaustive (const unsigned char *data, size_t len,
                      unsigned char **best, size_t *best_len,
                      int *best_method, char *best_desc)
 {
-  const int strategies[] =
-    { Z_DEFAULT_STRATEGY, Z_FILTERED, Z_HUFFMAN_ONLY,
-      3 /* Z_RLE */, Z_FIXED };
-  size_t n_strat = sizeof strategies / sizeof strategies[0];
+  const katzip_config_t *cfg = config_get ();
+  int strategies[5];
+  int n_strat = 0;
   size_t i;
+  int min_lvl, max_lvl;
 
-  /* Large files: only level 9 is worth the time. */
-  if (len > 1024 * 1024)
+  if (!data || !best || !best_len || !best_method || !best_desc)
+    return;
+  if (!cfg || !cfg->zlib_enabled)
+    return;
+
+  if (cfg->zlib_s_default)
+    strategies[n_strat++] = Z_DEFAULT_STRATEGY;
+  if (cfg->zlib_s_filtered)
+    strategies[n_strat++] = Z_FILTERED;
+  if (cfg->zlib_s_huffman)
+    strategies[n_strat++] = Z_HUFFMAN_ONLY;
+  if (cfg->zlib_s_rle)
+    strategies[n_strat++] = 3 /* Z_RLE */;
+  if (cfg->zlib_s_fixed)
+    strategies[n_strat++] = Z_FIXED;
+  if (n_strat == 0)
+    return;
+
+  min_lvl = cfg->zlib_min_level < 1 ? 1 : cfg->zlib_min_level;
+  max_lvl = cfg->zlib_max_level > 9 ? 9 : cfg->zlib_max_level;
+  if (min_lvl > max_lvl)
+    return;
+
+  /* Large files: only the top level is worth the time. */
+  if (len > cfg->zlib_full_grid_max)
     {
-      for (i = 0; i < n_strat; i++)
+      for (i = 0; i < (size_t) n_strat; i++)
         {
           unsigned char *c = NULL;
           size_t cl = 0;
-          if (deflate_with_zlib (data, len, 9, strategies[i], &c, &cl))
+          if (deflate_with_zlib (data, len, max_lvl, strategies[i],
+                                 &c, &cl))
             {
               char desc[96];
               snprintf (desc, sizeof desc,
-                        "Deflate zlib level 9 strategy %d", strategies[i]);
+                        "Deflate zlib level %d strategy %d",
+                        max_lvl, strategies[i]);
               consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
                                   best, best_len, best_method, best_desc, 256);
             }
@@ -343,10 +376,11 @@ try_zlib_exhaustive (const unsigned char *data, size_t len,
     }
 
   /* Small and medium files: try all levels and strategies. */
-  for (int lvl = 1; lvl <= 9; lvl++)
-    for (i = 0; i < n_strat; i++)
+  for (int lvl = min_lvl; lvl <= max_lvl; lvl++)
+    for (i = 0; i < (size_t) n_strat; i++)
       {
-        if ((strategies[i] == 3 || strategies[i] == Z_FIXED) && lvl != 9)
+        if ((strategies[i] == 3 || strategies[i] == Z_FIXED)
+            && lvl != max_lvl)
           continue;
 
         {
@@ -370,7 +404,19 @@ try_libdeflate_all (const unsigned char *data, size_t len,
                     unsigned char **best, size_t *best_len,
                     int *best_method, char *best_desc)
 {
-  for (int lvl = 1; lvl <= 12; lvl++)
+  const katzip_config_t *cfg = config_get ();
+  int min_lvl, max_lvl;
+
+  if (!data || !best || !best_len || !best_method || !best_desc)
+    return;
+  if (!cfg || !cfg->libdeflate_enabled)
+    return;
+  min_lvl = cfg->libdeflate_min_level < 1 ? 1 : cfg->libdeflate_min_level;
+  max_lvl = cfg->libdeflate_max_level > 12 ? 12 : cfg->libdeflate_max_level;
+  if (min_lvl > max_lvl)
+    return;
+
+  for (int lvl = min_lvl; lvl <= max_lvl; lvl++)
     {
       unsigned char *c = NULL;
       size_t cl = 0;
@@ -386,62 +432,81 @@ try_libdeflate_all (const unsigned char *data, size_t len,
 }
 #endif
 
-/* Stage 1: full Zopfli grid — 4 combos of (last, splitmax) plus
-   no-split for tiny files. Keeps the best stream seen. */
+/* Stage 1: Zopfli grid over configured (last x splitmax) combos plus
+   an optional no-split trial. Keeps the best stream seen. */
 static void
 try_zopfli_max (const unsigned char *data, size_t len,
                 unsigned char **best, size_t *best_len,
                 int *best_method, char *best_desc)
 {
+  const katzip_config_t *cfg = config_get ();
   int iter;
+  int n_grid;
+  int n_trials;
+  int trial_idx;
 
+  if (!data || !best || !best_len || !best_method || !best_desc)
+    return;
+  if (!cfg || !cfg->zopfli_enabled)
+    return;
   if (!policy_zopfli_allowed (data, len))
     return;
+  if (cfg->zopfli_n_last <= 0 || cfg->zopfli_n_splitmax <= 0)
+    {
+      if (len > cfg->zopfli_nosplit_max)
+        return;
+    }
 
-  if (len <= 64 * 1024)
-    iter = ZOPFLI_ITER_TINY;
-  else if (len <= 256 * 1024)
-    iter = ZOPFLI_ITER_SMALL;
-  else if (len <= 1024 * 1024)
-    iter = ZOPFLI_ITER_MEDIUM;
-  else
-    iter = ZOPFLI_ITER_LARGE;
+  iter = enhanced_budget_for_size (len);
+  if (iter <= 0)
+    iter = 15;
 
-  /* Grid: blocksplittinglast {0,1} x splitmax {15,0} = 4 trials.
-     Progress for single-file smooth mode: each trial covers
+  /* Progress for single-file smooth mode: each trial covers
      an equal slice of the Zopfli phase. */
   {
     int saved_base = g_progress_base;
     int saved_range = g_progress_range;
-    int n_trials = (len <= 64 * 1024) ? 5 : 4;
-    for (int last = 0; last <= 1; last++)
-      for (int sm = 0; sm < 2; sm++)
+    n_grid = cfg->zopfli_n_last * cfg->zopfli_n_splitmax;
+    n_trials = n_grid;
+    if (len <= cfg->zopfli_nosplit_max)
+      n_trials++;
+    if (n_trials <= 0)
+      return;
+    trial_idx = 0;
+    for (int li = 0; li < cfg->zopfli_n_last; li++)
+      for (int sm = 0; sm < cfg->zopfli_n_splitmax; sm++)
         {
-          int trial_idx = last * 2 + sm;
+          int last = cfg->zopfli_last[li];
+          int split_max = cfg->zopfli_splitmax[sm];
           int trial_base = saved_base + trial_idx * saved_range / n_trials;
           int trial_range = saved_range / n_trials;
           g_progress_base = trial_base;
           g_progress_range = trial_range;
 
-          int split_max = (sm == 0 ? 15 : 0);
-          unsigned char *c = NULL;
-          size_t cl = 0;
-          report_progress (trial_base);
-          if (deflate_with_zopfli (data, len, iter, split_max,
-                                   1, last, &c, &cl))
           {
-            char desc[128];
-            snprintf (desc, sizeof desc,
-                      "Deflate Zopfli iter %d splitmax %d last %d",
-                      iter, split_max, last);
-            consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
-                                best, best_len, best_method, best_desc, 256);
+            unsigned char *c = NULL;
+            size_t cl = 0;
+            report_progress (trial_base);
+            if (deflate_with_zopfli (data, len, iter, split_max,
+                                     1, last, &c, &cl))
+            {
+              if (getenv ("KATZIP_DEBUG"))
+                fprintf (stderr, "[dbg] zopfli iter %d splitmax %d last %d -> %zu\n",
+                         iter, split_max, last, cl);
+              char desc[128];
+              snprintf (desc, sizeof desc,
+                        "Deflate Zopfli iter %d splitmax %d last %d",
+                        iter, split_max, last);
+              consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                                  best, best_len, best_method, best_desc, 256);
+            }
           }
+          trial_idx++;
       }
-      /* Fifth trial for tiny files: no block splitting at all. */
-      if (len <= 64 * 1024)
+      /* Extra trial for small files: no block splitting at all. */
+      if (len <= cfg->zopfli_nosplit_max)
         {
-          int trial_base = saved_base + 4 * saved_range / n_trials;
+          int trial_base = saved_base + trial_idx * saved_range / n_trials;
           g_progress_base = trial_base;
           g_progress_range = saved_range / n_trials;
           report_progress (trial_base);
@@ -449,6 +514,9 @@ try_zopfli_max (const unsigned char *data, size_t len,
           size_t cl = 0;
           if (deflate_with_zopfli (data, len, iter, 0, 0, 0, &c, &cl))
             {
+              if (getenv ("KATZIP_DEBUG"))
+                fprintf (stderr, "[dbg] zopfli iter %d nosplit -> %zu\n",
+                         iter, cl);
               char desc[128];
               snprintf (desc, sizeof desc,
                         "Deflate Zopfli iter %d nosplit", iter);
@@ -458,6 +526,37 @@ try_zopfli_max (const unsigned char *data, size_t len,
         }
       report_progress (saved_base + saved_range);
     }
+}
+
+/* Stage 2: second engine (ECT/zenzop ideas, pure C, in-house).
+   Adds joint-cost-friendly black-box trials plus parser-diversified
+   single-block coding. Min-preserving: keeps global best only if smaller. */
+static void
+try_enhanced (const unsigned char *data, size_t len,
+              unsigned char **best, size_t *best_len,
+              int *best_method, char *best_desc)
+{
+  unsigned char *c = NULL;
+  size_t cl = 0;
+  char desc[256] = "";
+
+  if (!data || len == 0 || !best || !best_len || !best_method || !best_desc)
+    return;
+  /* [zopfli] enabled=off is the master switch: it also disables the
+     second engine, which is zopfli-powered internally. */
+  if (!config_get ()->enh_enabled || !config_get ()->zopfli_enabled)
+    return;
+  if (!policy_zopfli_allowed (data, len))
+    return;
+
+  /* Second engine owns the 80-100% slice: internal Zopfli iterations
+     keep reporting live through the same hook. */
+  g_progress_base = 80;
+  g_progress_range = 20;
+
+  if (enhanced_compress (data, len, &c, &cl, desc, sizeof desc))
+    consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
+                        best, best_len, best_method, best_desc, 256);
 }
 
 /* ------------------------------------------------------------------ */
@@ -488,6 +587,7 @@ competitor_compress (const unsigned char *data, size_t len,
       *out_len = 0;
       *method = COMP_METHOD_STORE;
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      report_progress (100);
       return true;
     }
 
@@ -501,6 +601,7 @@ competitor_compress (const unsigned char *data, size_t len,
       *out_len = len;
       *method = COMP_METHOD_STORE;
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      report_progress (100);
       return true;
     }
 
@@ -508,9 +609,11 @@ competitor_compress (const unsigned char *data, size_t len,
   best_method = COMP_METHOD_STORE;
   best = NULL;
 
-  /* Initialize progress range for this file (archiver may override). */
+  /* Progress split: Stage 1 grid reports 0-80%, Stage 2 engine 80-100%
+     (archiver only sets the callback, the mapping lives here). */
   g_progress_base = 0;
-  g_progress_range = 100;
+  g_progress_range = 80;
+  g_progress_max = 0;
 
   try_zlib_exhaustive (data, len, &best, &best_len, &best_method, best_desc);
 
@@ -518,8 +621,16 @@ competitor_compress (const unsigned char *data, size_t len,
   try_libdeflate_all (data, len, &best, &best_len, &best_method, best_desc);
 #endif
 
-  /* Extra strategy for very small files mimics AdvanceCOMP retry. */
-  if (len < SMALL_FILE_EXTRA_PASS)
+  /* Extra strategy for very small files mimics AdvanceCOMP retry.
+     Honors the configured level range and strategy set. */
+  if (config_get ()->zlib_enabled
+      && config_get ()->zlib_extra_retry
+      && config_get ()->zlib_s_default
+      && len < config_get ()->zlib_extra_retry_max
+      && 6 >= (config_get ()->zlib_min_level < 1
+               ? 1 : config_get ()->zlib_min_level)
+      && 6 <= (config_get ()->zlib_max_level > 9
+               ? 9 : config_get ()->zlib_max_level))
     {
       unsigned char *c = NULL;
       size_t cl = 0;
@@ -533,6 +644,8 @@ competitor_compress (const unsigned char *data, size_t len,
     }
 
   try_zopfli_max (data, len, &best, &best_len, &best_method, best_desc);
+
+  try_enhanced (data, len, &best, &best_len, &best_method, best_desc);
 
   /* If nothing beat the original size, store. */
   if (!best || best_len >= len)
@@ -551,6 +664,7 @@ competitor_compress (const unsigned char *data, size_t len,
       *out_len = len;
       *method = COMP_METHOD_STORE;
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      report_progress (100);
       return true;
     }
 
@@ -558,6 +672,7 @@ competitor_compress (const unsigned char *data, size_t len,
   *out_len = best_len;
   *method = best_method;
   strncpy (g_last_desc, best_desc, sizeof g_last_desc);
+  report_progress (100);
 
   /* Track overall best for final summary (largest saving). */
   {

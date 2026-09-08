@@ -20,7 +20,7 @@ ZOPFLI_SRCS = third_party/zopfli/src/zopfli/blocksplitter.c \
   third_party/zopfli/src/zopfli/gzip_container.c \
   third_party/zopfli/src/zopfli/zopfli_lib.c
 
-SRCS = src/policy.c src/competitor.c src/archiver.c src/main.c $(ZOPFLI_SRCS)
+SRCS = src/policy.c src/config.c src/enhanced.c src/competitor.c src/archiver.c src/main.c $(ZOPFLI_SRCS)
 OBJS = $(SRCS:.c=.o)
 TARGET = katzip
 STATIC_TARGET = katzip_static
@@ -41,6 +41,7 @@ clean:
 
 test: $(TARGET)
 	./tests_c.sh
+	./tests_stage2.sh
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/

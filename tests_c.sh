@@ -3,6 +3,7 @@ set -e
 echo "=== C tests (katzip) ==="
 TMP=$(mktemp -d)
 trap "rm -rf $TMP" EXIT
+export KATZIP_INI="${KATZIP_INI:-/dev/null}"
 
 # 1. help
 ./katzip --help 2>&1 | grep -q "Usage:.*katzip"
@@ -88,5 +89,26 @@ echo "regression: OK"
 CNT=$(strace -f -e execve ./katzip $TMP/strace $TMP/b.txt 2>&1 | grep -c "execve")
 if [ "$CNT" -gt 1 ]; then echo "FAIL: calls external"; exit 1; fi
 echo "no external calls: OK"
+
+# 9. lean container (Leanify rule): no extra fields, no data descriptors,
+#    no comments anywhere — our writer emits the minimal layout already.
+python3 -c "
+import struct
+d=open('$TMP/b.zip','rb').read()
+ver,flag,meth,mt,md,crc,cs,us,fnl,efl = struct.unpack('<HHHHHIIIHH', d[4:30])
+assert efl == 0, 'local extra field present'
+assert flag & 0x08 == 0, 'data descriptor bit set'
+ci = d.find(b'PK\x01\x02')
+c = struct.unpack('<HHHHHHIIIHHHHHII', d[ci+4:ci+46])
+assert c[10] == 0, 'central extra field present'
+assert c[11] == 0, 'file comment present'
+ei = d.rfind(b'PK\x05\x06')
+e = struct.unpack('<HHHHIIH', d[ei+4:ei+22])
+assert e[6] == 0, 'archive comment present'
+# exact overhead: 30 + 46 + 22 + 2*namelen
+assert len(d)-cs == 30+46+22+2*fnl, 'container overhead drifted'
+print('overhead bytes:', len(d)-cs)
+"
+echo "lean container: OK"
 
 echo "ALL C TESTS PASSED"

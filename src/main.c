@@ -4,16 +4,18 @@
 #include <strings.h>
 
 #include "archiver.h"
+#include "config.h"
 
 static void
 print_usage (void)
 {
   fprintf (stderr,
-           "KATZip v1.0 \342\200\224 Deflating with extreme devotion.\n"
+           "KATZip v1.0 - Deflating with extreme devotion.\n"
            "Dedicated to the memory of Phil Katz (1962-2000), the father of ZIP.\n"
            "\n"
            "Usage:   katzip <archive.zip> <input_files...>\n"
-           "Example: katzip APPNOTE APPNOTE.TXT\n");
+           "Example: katzip APPNOTE APPNOTE.TXT\n"
+            "Config:  $KATZIP_INI, ./katzip.ini, or <binary-dir>/katzip.ini.\n");
 }
 
 /* Append .zip if missing (case-insensitive). Caller must free. */
@@ -77,6 +79,12 @@ main (int argc, char *argv[])
         print_usage ();
         return 1;
       }
+
+  {
+    const char *src = config_source ();
+    fprintf (stderr, "config: %s\n", src ? src : "(built-in defaults)");
+    fflush (stderr);
+  }
 
   archive = ensure_zip_extension (argv[1]);
   if (!archive)

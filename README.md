@@ -38,13 +38,30 @@ same line via `\r`. When finished, the best method, its parameters and the
 total compressed size without ZIP overhead are printed on the same line:
 
 ```
-33%66%100%Deflate Zopfli iter 200 splitmax 15 last 0 626 bytes
+33%
+66%
+100%
+Deflate Zopfli iter 200 splitmax 15 last 0 626 bytes
 ```
 
 ## How it works
 
 * `src/policy.*` — skip already compressed files (jpg, mp4, zip, ...), high entropy check, size limits.
-* `src/competitor.*` — competition: `zlib` (levels and strategies) + `libdeflate` (1..12) + Zopfli (full grid `iter up to 1000, splitmax 0/15, last 0/1`). The smallest valid DEFLATE wins.
+* `katzip.ini` — all contest settings. Search order: `$KATZIP_INI`,
+  `./katzip.ini` (working dir), `<binary-dir>/katzip.ini`;
+  every run prints the loaded file first as `config: <path>`
+  (`KATZIP_INI=/dev/null` forces built-in defaults):
+  `[policy]` entropy/limits/skip list, `[zlib]` on/off + levels + strategies,
+  `[libdeflate]` on/off + levels, `[zopfli]` on/off + per-size iterations +
+  split grid, `[enhanced]` on/off + per-trial toggles (needs `[zopfli] enabled`,
+  which is the master switch for anything zopfli-powered). Missing file/keys fall
+  back to built-in defaults, so deleting the file changes nothing. Example:
+  disable the heavy engines with `[zopfli] enabled = off` + `[enhanced]
+  enabled = off` and watch `zlib`/`libdeflate` win instead.
+* `src/config.*` — tiny dependency-free INI reader with validation/clamping.
+* `KATZIP_DEBUG=1` — prints every accepted trial (`[dbg] engine ... -> size`)
+  to stderr; for landscape analysis like the ECT gap chase.
+* `src/competitor.*` — competition: `zlib` (levels and strategies) + `libdeflate` (1..12) + Zopfli Stage 1 grid (`iter up to 1000, splitmax 0/15, last 0/1`) + Stage 2 second engine (`src/enhanced.*`: forced-fixed, nosplit/limited-split joints, parser-diversified single-block coding, per-block actual-size recoding). The smallest valid DEFLATE wins.
 * `src/archiver.*` — writes ZIP by hand (local file, central directory, EOCD, Zip64 when needed), UTF-8, CRC32, progress and final summary.
 * `src/main.c` — CLI `katzip <archive.zip> <input_files...>` with auto `.zip`.
 * `third_party/zopfli` — Google Zopfli, Apache 2.0.
@@ -52,7 +69,7 @@ total compressed size without ZIP overhead are printed on the same line:
 ## Test
 
 ```bash
-make test   # builds katzip and runs ./tests_c.sh
+make test   # builds katzip and runs ./tests_c.sh + ./tests_stage2.sh
 ```
 
 Tests check help text, auto extension, progress, final method line, and that `katzip` beats `zip -9` and `7z -mx9`.
