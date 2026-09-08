@@ -70,9 +70,13 @@ Deflate Zopfli iter 200 splitmax 15 last 0 626 bytes
 
 ```bash
 make test   # builds katzip and runs ./tests_c.sh + ./tests_stage2.sh
+./bench/run.sh         # size regression vs zip -9 / 7z / zopfli / ect
+./bench/run.sh --check # fail if katzip regresses vs bench/baseline.txt
 ```
 
-Tests check help text, auto extension, progress, final method line, and that `katzip` beats `zip -9` and `7z -mx9`.
+Tests check help text (`--help`/`--version`), auto extension, permissions (`0755`), mtime sync, progress, final method line, duplicate/self-overwrite rejection, and that `katzip` beats `zip -9` and `7z -mx9`.
+
+Dependencies for `make test`: `gcc`, `zlib1g-dev`, `libdeflate-dev` (optional), plus `zip`, `unzip`, `p7zip-full` (`7z`), `python3`, `strace`. CI installs them via `apt-get`.
 
 ## Help
 

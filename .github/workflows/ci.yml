@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libdeflate-dev zip unzip p7zip-full python3 strace
+      - name: build
+        run: make -j$(nproc)
+      - name: werror
+        run: make clean && make -j$(nproc)
+      - name: tests
+        run: make test
+      - name: bench regression
+        run: ./bench/run.sh --check
+      - name: asan
+        run: |
+          make clean
+          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc -Ithird_party/zopfli/src -DHAVE_LIBDEFLATE" LDFLAGS="-fsanitize=address,undefined -lm -lz -ldeflate" -j$(nproc)
+          ./tests_c.sh
+          ./tests_stage2.sh

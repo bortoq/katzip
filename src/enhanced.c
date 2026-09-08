@@ -1106,7 +1106,7 @@ enh_encode_ranges (const unsigned char *data, size_t len, int iter,
   return ok;
 }
 
-/* Foreign split map A (Kzip/Rezop idea): greedy LZ77 front-end (different
+/* Foreign split map A (Kzip/Rezop idea: foreign map + rescoring): greedy LZ77 front-end (different
    parse family than optimal-based maps) + BlockSplitLZ77, rescored through
    our per-block machinery. Byte coordinates via store pos[]. */
 static bool

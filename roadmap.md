@@ -6,10 +6,12 @@ readable everywhere (`unzip`, Python `zipfile`, 7-Zip, Explorer, macOS).
 Speed does not matter; size is the only metric.
 
 Current state: per-file contest `zlib (levels x strategies)` +
-`libdeflate (1..12)` + `Zopfli (time-bounded iterations, splitmax 15 and 0)`
-wins against `zip -9` / `7z -mx=9` on text and code. Zopfli is vendored in
-`third_party/zopfli`. Everything below is about squeezing the last bytes
-out of DEFLATE without changing the format.
+`libdeflate (1..12)` + `Zopfli Stage 1 grid (iter 1000/200/60/15, splitmax 15,0, last 0)` +
+Stage 2 second engine (`src/enhanced.*`: forced-fixed, nosplit, split5, parser-diversified
+single-block, per-block recode `recode_iters=500`, Kzip foreign-map hybrid, merge-blocks)
+wins against `zip -9` / `7z -mx=9` / `ect -9 --strict -zip` on text and code (e.g. 2M FB2:
+katzip 1426632 vs ect 1426753). Zopfli is vendored in `third_party/zopfli` (modified
+only for progress hook, see NOTICE). Remaining is Stage 3 `deflate_polish` and optional Stage 4.
 
 ---
 
@@ -27,7 +29,7 @@ Kzip plays by the same rule (deflate-only) — the fight is fair.
 | ECT `-9 --strict` (fhanau) | check before vendoring | Beats Zopfli via better Huffman-cost heuristics at block joints. Candidate engine #2. |
 | zenzop (imazen, Rust) | Apache-2.0 | Zopfli fork: default mode byte-identical + faster; `enhanced` mode (ECT-derived: expanded precode search, multi-strategy Huffman, parser diversification) beats ECT-9 at 60 iters. Candidate engine #2 alt. Rust = FFI or reference. |
 | Kzip (Ken Silverman) | freeware, NOT open source | Cannot vendor. Idea only: its block-split points sometimes beat Zopfli's. |
-| Rezop | obscure | Cannot rely on. Idea only: rescore чужой split-map through Zopfli. |
+| Rezop | obscure | Cannot rely on. Idea only: rescore foreign split-map through Zopfli. |
 | DeflOpt / Defluff | CLOSED source | Cannot vendor. Reimplementable ideas only (see §4). |
 | deft4j / JarTighten (NeRdTheNed) | permissive (open) | Usable ideas/code for a post-pass optimizer: dynamic-block header recoding, len-3 match/literal swaps. |
 | Columbo (ace-dent, 2026) | open work-in-progress | Watch and evaluate: combines deflopt+defluff+deft4j methods in one pass. |
@@ -55,8 +57,8 @@ form of "zopfli-patched"; prefer evaluating it over random forks.
 Kzip cannot be vendored (license) and Rezop is not a dependable dependency.
 But the mechanism is reproducible inside Zopfli: try SEVERAL split-finding
 strategies per file (`blocksplittinglast` 0/1, `splitmax` 15/0, `splitting`
-on/off) and keep the best stream. That is " чужой split-map + Zopfli
-rescoring" without чужого code. Effort: hours. This is Stage 1 below.
+on/off) and keep the best stream. That is "foreign split-map + Zopfli
+rescoring" without foreign code. Effort: hours. This is Stage 1 below.
 
 ### Tip 4 — DeflOpt / Defluff post-pass. REIMPLEMENT (open ideas only).
 Both tools are closed source, so no vendoring. What they do is public
@@ -72,7 +74,7 @@ Risk: bit-level bugs — fenced by mandatory round-trip check per entry.
 
 ## 4. Plan: "Zopfli killer" stages (DEFLATE-only, no format change)
 
-### Stage 1 — Full Zopfli grid (hours, ~zero risk). Do first.
+### Stage 1 — Full Zopfli grid (hours, ~zero risk). DONE.
 - Raise iteration cap to 1000; per-size budget: `<=64K -> 1000`,
   `<=256K -> 200`, `<=1M -> 60`, `>1M -> 15` (time fence).
 - Try option grid per file and keep best: `blocksplittinglast` {0,1} x
@@ -82,7 +84,7 @@ Risk: bit-level bugs — fenced by mandatory round-trip check per entry.
   <= 7z-mx9); new invariant: best stream never worse than current katzip
   on the corpus (store before/after sizes in test log).
 
-### Stage 2 — Second engine: ECT or zenzop-enhanced (days).
+### Stage 2 — Second engine: in-house ECT/zenzop ideas (days). DONE (in-house C, benches vs ECT closed).
 - Benchmark `ect -9 --strict --zip` and zenzop-enhanced-60 on our corpus.
 - Vendor the winner's core (license check!) as second contestant, or shell
   out NOTHING (standalone rule: link it in, never call external tools).
@@ -90,7 +92,7 @@ Risk: bit-level bugs — fenced by mandatory round-trip check per entry.
   three enhanced tricks (precode search, Huffman multi-strategy, parser
   diversification) on our C Zopfli. Prefer the smaller diff that closes
   the measured gap.
-- Acceptance: corpus size strictly decreases vs Stage 1; `unzip -t` green.
+- Acceptance: corpus size strictly decreases vs Stage 1; `unzip -t` green. DONE: bench/corpus 27K katzip 12316 < zopfli 12384, 2M FB2 katzip 1426632 < ect 1426753.
 
 ### Stage 3 — Post-pass `deflate_polish()` (1–2 weeks).
 - Re-encode dynamic-block headers (full precode search à la deft4j),
