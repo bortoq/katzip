@@ -15,10 +15,10 @@
 #include "zopfli/zopfli.h"
 
 /* Progress callback for smooth single-file indication. */
-competitor_progress_cb g_progress_cb = NULL;
-void *g_progress_user = NULL;
-int g_progress_base = 0;
-int g_progress_range = 80;
+static competitor_progress_cb g_progress_cb = NULL;
+static void *g_progress_user = NULL;
+static int g_progress_base = 0;
+static int g_progress_range = 80;
 /* Highest pct already reported for the current file: trials restart their
    own iteration counters, so raw values would jump backwards. Clamp. */
 static int g_progress_max = 0;
@@ -30,7 +30,7 @@ competitor_set_progress_cb (competitor_progress_cb cb, void *user)
   g_progress_user = user;
 }
 
-void
+static void
 report_progress (int pct)
 {
   if (!g_progress_cb)
@@ -474,8 +474,9 @@ try_zopfli_max (const unsigned char *data, size_t len,
       return;
     trial_idx = 0;
     for (int li = 0; li < cfg->zopfli_n_last; li++)
-      for (int sm = 0; sm < cfg->zopfli_n_splitmax; sm++)
-        {
+      {
+        for (int sm = 0; sm < cfg->zopfli_n_splitmax; sm++)
+          {
           int last = cfg->zopfli_last[li];
           int split_max = cfg->zopfli_splitmax[sm];
           int trial_base = saved_base + trial_idx * saved_range / n_trials;
@@ -501,7 +502,8 @@ try_zopfli_max (const unsigned char *data, size_t len,
                                   best, best_len, best_method, best_desc, 256);
             }
           }
-          trial_idx++;
+            trial_idx++;
+          }
       }
       /* Extra trial for small files: no block splitting at all. */
       if (len <= cfg->zopfli_nosplit_max)

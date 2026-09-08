@@ -861,7 +861,7 @@ enh_trial_bits (const ZopfliLZ77Store *store, size_t raw_len,
 /* ------------------------------------------------------------------ */
 /* Shared range machinery: best coding per range, merge sweep, emit. */
 
-#define ENH_MAX_BLOCKS 16
+#define ENH_MAX_BLOCKS 16 /* == max zopfli split points (15) +1; truncates silently if exceeded — verify-fenced */
 
 typedef struct
 {

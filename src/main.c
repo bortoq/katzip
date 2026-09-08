@@ -64,6 +64,19 @@ main (int argc, char *argv[])
       print_usage ();
       return 0;
     }
+  if (strcmp (argv[1], "--version") == 0
+      || strcmp (argv[1], "-V") == 0)
+    {
+      fprintf (stderr, "katzip 1.0 (DEFLATE-only)\n");
+      return 0;
+    }
+  /* Archive name starting with '-' is ambiguous — require ./ prefix. */
+  if (argv[1][0] == '-')
+    {
+      fprintf (stderr, "archive name '%s' looks like an option; use ./ prefix\n", argv[1]);
+      print_usage ();
+      return 1;
+    }
 
   if (argc < 3)
     {

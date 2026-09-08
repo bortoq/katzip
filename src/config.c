@@ -50,7 +50,7 @@ config_defaults (katzip_config_t *cfg)
   cfg->zlib_s_rle = 1;
   cfg->zlib_s_fixed = 1;
   cfg->zlib_full_grid_max = 1024UL * 1024UL;
-  cfg->zlib_extra_retry = 1;
+  cfg->zlib_extra_retry = 0;
   cfg->zlib_extra_retry_max = 64UL * 1024UL;
 
   cfg->libdeflate_enabled = 1;
@@ -69,8 +69,7 @@ config_defaults (katzip_config_t *cfg)
   cfg->zopfli_splitmax[1] = 0;
   cfg->zopfli_n_splitmax = 2;
   cfg->zopfli_last[0] = 0;
-  cfg->zopfli_last[1] = 1;
-  cfg->zopfli_n_last = 2;
+  cfg->zopfli_n_last = 1;
   cfg->zopfli_nosplit_max = 64UL * 1024UL;
 
   cfg->enh_enabled = 1;
@@ -226,7 +225,6 @@ static void
 set_policy_key (katzip_config_t *cfg, const char *key, const char *val)
 {
   int b;
-  int x;
   size_t z;
   double d;
 
@@ -266,10 +264,6 @@ set_policy_key (katzip_config_t *cfg, const char *key, const char *val)
           cfg->skip_ext[cfg->n_skip_ext][KATZIP_EXT_LEN - 1] = '\0';
           cfg->n_skip_ext++;
         }
-    }
-  else if (!strcmp (key, "strategies") && 0)
-    {
-      (void) x;
     }
 }
 
@@ -557,12 +551,12 @@ config_get (void)
       if (env && *env && file_readable (env))
         {
           config_load_file (&g_cfg, env);
-          strncpy (g_source, env, sizeof g_source - 1);
+          snprintf (g_source, sizeof g_source, "%s", env);
         }
       else if (file_readable ("katzip.ini"))
         {
           config_load_file (&g_cfg, "katzip.ini");
-          strncpy (g_source, "katzip.ini", sizeof g_source - 1);
+          snprintf (g_source, sizeof g_source, "katzip.ini");
         }
       else
         {
@@ -570,7 +564,7 @@ config_get (void)
           if (exepath[0] && file_readable (exepath))
             {
               config_load_file (&g_cfg, exepath);
-              strncpy (g_source, exepath, sizeof g_source - 1);
+              snprintf (g_source, sizeof g_source, "%s", exepath);
             }
         }
       g_loaded = 1;

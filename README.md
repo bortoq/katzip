@@ -77,11 +77,12 @@ Tests check help text, auto extension, progress, final method line, and that `ka
 ## Help
 
 ```
-KATZip v1.0 — Deflating with extreme devotion.
+KATZip v1.0 - Deflating with extreme devotion.
 Dedicated to the memory of Phil Katz (1962–2000), the father of ZIP.
 
 Usage:   katzip <archive.zip> <input_files...>
 Example: katzip APPNOTE APPNOTE.TXT
+Config:  $KATZIP_INI, ./katzip.ini, or <binary-dir>/katzip.ini.
 ```
 
 ## License

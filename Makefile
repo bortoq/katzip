@@ -1,5 +1,6 @@
 CC = gcc
-CFLAGS = -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
+CFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-stringop-truncation -Wno-stringop-overflow -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
+ZOPFLI_CFLAGS = -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
 LDFLAGS = -lm -lz
 HAVE_DEFLATE = $(shell test -f /usr/include/libdeflate.h && echo 1 || echo 0)
 ifeq ($(HAVE_DEFLATE),1)
@@ -33,6 +34,9 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+third_party/zopfli/src/zopfli/%.o: third_party/zopfli/src/zopfli/%.c
+	$(CC) $(ZOPFLI_CFLAGS) -c $< -o $@
+
 static: $(OBJS)
 	$(CC) $(OBJS) -o $(STATIC_TARGET) -static $(LDFLAGS) -lm
 
@@ -45,5 +49,6 @@ test: $(TARGET)
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
+	install -m 644 katzip.ini /usr/local/etc/katzip.ini.example
 
 .PHONY: all clean test install static

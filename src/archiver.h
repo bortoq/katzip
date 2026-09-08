@@ -14,17 +14,22 @@ typedef struct
   size_t comp_len;
   int method;
   unsigned int crc;
+  unsigned int st_mode;
+  long long mtime;
 } zip_entry_t;
 
 typedef struct
 {
   FILE *file;
+  char *archive_path;
+  char *tmp_path;
   zip_entry_t *entries;
   size_t count;
   size_t capacity;
   long *offsets;
   bool *is_zip64;
   bool closed;
+  bool tmp_created;
 } zip_writer_t;
 
 /* Start a new archive at PATH. */

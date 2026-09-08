@@ -1,0 +1,13 @@
+katzip — NOTICE for vendored Zopfli
+
+This distribution includes a modified copy of Google Zopfli
+(https://github.com/google/zopfli, Apache-2.0).
+
+Modifications by katzip:
+  - third_party/zopfli/src/zopfli/squeeze.c: added extern hook
+    `zopfli_report_iter` for single-file progress reporting (one line).
+    Diff: +1 extern declaration and +1 call per iteration.
+  - No other functional changes; all other files are pristine upstream.
+
+Upstream Apache-2.0 license and NOTICE requirements remain as per
+third_party/zopfli/CONTRIBUTING.md and LICENSE files.
