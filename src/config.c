@@ -84,7 +84,7 @@ config_defaults (katzip_config_t *cfg)
   cfg->enh_split15 = 1;
   cfg->enh_merge_blocks = 1;
   cfg->enh_kzip_split = 1;
-  cfg->enh_recode_iters = 200;
+  cfg->enh_recode_iters = 500;
 }
 
 /* ------------------------------------------------------------------ */

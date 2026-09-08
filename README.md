@@ -61,7 +61,7 @@ Deflate Zopfli iter 200 splitmax 15 last 0 626 bytes
 * `src/config.*` — tiny dependency-free INI reader with validation/clamping.
 * `KATZIP_DEBUG=1` — prints every accepted trial (`[dbg] engine ... -> size`)
   to stderr; for landscape analysis like the ECT gap chase.
-* `src/competitor.*` — competition: `zlib` (levels and strategies) + `libdeflate` (1..12) + Zopfli Stage 1 grid (`iter up to 1000, splitmax 0/15, last 0/1`) + Stage 2 second engine (`src/enhanced.*`: forced-fixed, nosplit/limited-split joints, parser-diversified single-block coding, per-block actual-size recoding). The smallest valid DEFLATE wins.
+* `src/competitor.*` — competition: `zlib` (levels and strategies) + `libdeflate` (1..12) + Zopfli Stage 1 grid (`iter up to 1000, splitmax 0/15, last 0/1`) + Stage 2 second engine (`src/enhanced.*`: forced-fixed, nosplit/limited-split joints, parser-diversified single-block coding, per-block actual-size recoding with `recode_iters=500`, Kzip+Rezop foreign-map hybrid, merge-blocks). The smallest valid DEFLATE wins. For large texts (>1M, e.g. FB2) the default is `iter_large=15 + recode=500` — shallow grid + deep per-block recoding, which beats `ect -9 --strict -zip` at a fraction of the cost of running everything deep (`recode_iters=0` follows the grid budget; Stage 2 benchmarks vs ECT are considered closed on this setting).
 * `src/archiver.*` — writes ZIP by hand (local file, central directory, EOCD, Zip64 when needed), UTF-8, CRC32, progress and final summary.
 * `src/main.c` — CLI `katzip <archive.zip> <input_files...>` with auto `.zip`.
 * `third_party/zopfli` — Google Zopfli, Apache 2.0.

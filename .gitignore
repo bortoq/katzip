@@ -11,3 +11,5 @@ __pycache__/
 /tmp/
 # archives
 *.zip
+# user test data (fb2 etc) - do not commit
+/test/
