@@ -107,27 +107,56 @@ to_dos_time (time_t t, uint16_t *dosdate, uint16_t *dostime)
                          | (tm->tm_sec / 2));
 }
 
-/* Normalize an archive name: backslashes to slashes, strip leading /. */
+/* Normalize an archive name: backslashes to slashes, collapse //, remove ./, forbid .., strip leading /. */
 static char *
 normalize_name (const char *arcname)
 {
   size_t len;
+  char *tmp;
   char *out;
-  size_t j;
-  size_t start;
+  size_t j, k;
   if (!arcname) return NULL;
   len = strlen (arcname);
-  out = malloc (len + 1);
-  if (!out) return NULL;
+  tmp = malloc (len + 1);
+  if (!tmp) return NULL;
   for (j = 0; j < len; j++)
     {
       char c = arcname[j];
-      out[j] = (c == '\\' ? '/' : c);
+      tmp[j] = (c == '\\' ? '/' : c);
     }
-  out[len] = '\0';
-  start = 0;
-  while (out[start] == '/') start++;
-  if (start) memmove (out, out + start, strlen (out + start) + 1);
+  tmp[len] = '\0';
+  out = malloc (len + 1);
+  if (!out) { free(tmp); return NULL; }
+  /* Split by '/', collapse, handle . and .. */
+  k = 0;
+  size_t i = 0;
+  while (i < len)
+    {
+      /* skip slashes */
+      while (i < len && tmp[i] == '/') i++;
+      if (i >= len) break;
+      size_t beg = i;
+      while (i < len && tmp[i] != '/') i++;
+      size_t seglen = i - beg;
+      if (seglen == 1 && tmp[beg] == '.')
+        continue;
+      if (seglen == 2 && tmp[beg] == '.' && tmp[beg+1] == '.')
+        {
+          /* Pop last segment if any */
+          if (k > 0)
+            {
+              /* find previous slash */
+              if (k > 1 && out[k-1] == '/') k--;
+              while (k > 0 && out[k-1] != '/') k--;
+            }
+          continue;
+        }
+      if (k > 0) out[k++] = '/';
+      memcpy (out + k, tmp + beg, seglen);
+      k += seglen;
+    }
+  out[k] = '\0';
+  free(tmp);
   if (out[0] == '\0')
     {
       free (out);
@@ -591,7 +620,7 @@ collect_one (const char *path, const char *base_parent,
         }
       return true;
     }
-  else
+  else if (S_ISREG(st.st_mode))
     {
       char arc[4096];
       const char *rel;
@@ -615,6 +644,11 @@ collect_one (const char *path, const char *base_parent,
       (*items)[*count].arcname=a_dup;
       (*items)[*count].fullpath=p_dup;
       (*count)++;
+      return true;
+    }
+  else
+    {
+      fprintf(stderr, "warning: skipping non-regular file \"%s\"\n", path);
       return true;
     }
 }
@@ -645,6 +679,7 @@ create_zip_archive (const char *archive, char **files, size_t nfiles)
       else
         {
           if (S_ISLNK(st.st_mode)) continue; /* skip symlink files */
+          if (!S_ISREG(st.st_mode)) { fprintf(stderr, "warning: skipping non-regular file \"%s\"\n", p); continue; }
           const char *base=strrchr(p,'/');
           const char *arc=base?base+1:p;
           char *a_dup=strdup(arc); char *p_dup=strdup(p);
@@ -708,9 +743,26 @@ dup_fail:
       else { fprintf(stderr,"0%%\r"); fflush(stderr); }
       if (lstat(items[i].fullpath,&dst)==0 && S_ISDIR(dst.st_mode))
         {
-          /* Empty directory entry — store as dir/ with no data. */
-          unsigned char empty=0;
-          if (!zip_writer_add_file(&writer, items[i].arcname, &empty, 0)) { ok=false; break; }
+          /* Empty directory entry — preserve real mode, not hardcoded 0755. */
+          uint16_t ddate, dtime;
+          long off = ftell(writer.file);
+          bool need64 = false;
+          if (off<0) { ok=false; break; }
+          to_dos_time(dst.st_mtime, &ddate, &dtime);
+          if (!write_local_entry(&writer, items[i].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
+          if (!ensure_capacity(&writer)) { ok=false; break; }
+          writer.entries[writer.count].filename = strdup(items[i].arcname);
+          writer.entries[writer.count].comp_data = NULL;
+          writer.entries[writer.count].data_len = 0;
+          writer.entries[writer.count].comp_len = 0;
+          writer.entries[writer.count].method = COMP_METHOD_STORE;
+          writer.entries[writer.count].crc = 0;
+          writer.entries[writer.count].st_mode = dst.st_mode & 07777;
+          writer.entries[writer.count].mtime = (long long)dst.st_mtime;
+          writer.offsets[writer.count]=off;
+          writer.is_zip64[writer.count]=need64;
+          if (!writer.entries[writer.count].filename) { ok=false; break; }
+          writer.count++;
         }
       else if (!zip_writer_add_path(&writer, items[i].arcname, items[i].fullpath)) { ok=false; break; }
     }

@@ -149,13 +149,25 @@ echo "empty dir: OK"
 ln -sf $TMP/perm.txt $TMP/link.txt
 if ./katzip $TMP/symonly.zip $TMP/link.txt 2>/dev/null; then echo "FAIL symonly should reject"; exit 1; fi
 echo "symlink filter: OK"
-# atomicity: existing archive not deleted on failure (duplicate triggers fail)
+# atomicity: existing archive not deleted on failure after writer started (RLIMIT_FSIZE triggers write error)
 echo "keep" > $TMP/keep_a.txt; ./katzip $TMP/keep.zip $TMP/keep_a.txt >/dev/null 2>&1
 cp $TMP/keep.zip $TMP/keep_before.zip
-mkdir -p $TMP/adup1 $TMP/adup2; echo a > $TMP/adup1/dup.txt; echo b > $TMP/adup2/dup.txt
-if ./katzip $TMP/keep.zip $TMP/adup1/dup.txt $TMP/adup2/dup.txt 2>/dev/null; then echo "FAIL should fail on duplicate"; exit 1; fi
+# Create a file larger than the RLIMIT to force write failure after local header
+python3 -c "import os; open('$TMP/big_atomic.txt','wb').write(os.urandom(5000))"
+# Use python to set RLIMIT_FSIZE=200 and exec katzip (fails after header, tests P0-1 + N-1)
+python3 - "$TMP/keep.zip" "$TMP/big_atomic.txt" << 'PY2'
+import resource, subprocess, sys, signal
+resource.setrlimit(resource.RLIMIT_FSIZE, (200, 200))
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+ret = subprocess.call(["./katzip", sys.argv[1], sys.argv[2]])
+sys.exit(0 if ret!=0 else 1)
+PY2
+if [ $? -ne 0 ]; then echo "FAIL atomic RLIMIT should have failed"; exit 1; fi
 test -f $TMP/keep.zip
 python3 -c "import zipfile; z=zipfile.ZipFile('$TMP/keep_before.zip'); assert z.namelist()==zipfile.ZipFile('$TMP/keep.zip').namelist()"
+# Also keep duplicate test as separate check
+mkdir -p $TMP/adup1 $TMP/adup2; echo a > $TMP/adup1/dup.txt; echo b > $TMP/adup2/dup.txt
+if ./katzip $TMP/dup2.zip $TMP/adup1/dup.txt $TMP/adup2/dup.txt 2>/dev/null; then echo "FAIL dup should fail"; exit 1; fi
 echo "atomic keep: OK"
 # archive mode 0644
 umask 0022; echo "mode" > $TMP/mode2.txt; ./katzip $TMP/mode2.zip $TMP/mode2.txt >/dev/null 2>&1
