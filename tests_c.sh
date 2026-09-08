@@ -111,4 +111,55 @@ print('overhead bytes:', len(d)-cs)
 "
 echo "lean container: OK"
 
+# 10. P0 fixes: permissions, mtime, duplicates, self-overwrite, empty dirs, symlinks, atomicity
+# permissions
+echo "test perm" > $TMP/perm.txt; chmod 750 $TMP/perm.txt
+./katzip $TMP/perm.zip $TMP/perm.txt
+python3 -c "
+import struct; d=open('$TMP/perm.zip','rb').read()
+ci=d.find(b'PK\x01\x02'); ext=struct.unpack('<I', d[ci+38:ci+42])[0]
+mode=(ext>>16)&0o777
+assert mode==0o750, f'perm {oct(mode)} != 0o750'
+"
+echo "permissions: OK"
+# mtime sync
+touch -d "2001-02-03 04:05:06" $TMP/perm.txt
+./katzip $TMP/mtime.zip $TMP/perm.txt
+python3 -c "
+import struct; d=open('$TMP/mtime.zip','rb').read()
+ldos=struct.unpack('<HH', d[10:14]); ci=d.find(b'PK\x01\x02'); cdos=struct.unpack('<HH', d[ci+12:ci+16])
+assert ldos==cdos, f'mtime desync {ldos} vs {cdos}'
+"
+echo "mtime: OK"
+# duplicate
+mkdir -p $TMP/d1 $TMP/d2; echo one > $TMP/d1/x.txt; echo two > $TMP/d2/x.txt
+if ./katzip $TMP/dup.zip $TMP/d1/x.txt $TMP/d2/x.txt 2>/dev/null; then echo "FAIL dup should reject"; exit 1; fi
+echo "duplicate: OK"
+# self-overwrite
+cp $TMP/perm.txt $TMP/self.zip
+if ./katzip $TMP/self.zip $TMP/self.zip 2>/dev/null; then echo "FAIL self should reject"; exit 1; fi
+test -f $TMP/self.zip
+echo "self-overwrite: OK"
+# empty dir
+mkdir -p $TMP/emptydir
+./katzip $TMP/empty_dir.zip $TMP/emptydir
+python3 -c "import zipfile; z=zipfile.ZipFile('$TMP/empty_dir.zip'); assert any(n.endswith('/') for n in z.namelist()), 'empty dir not preserved'"
+echo "empty dir: OK"
+# symlink all filtered
+ln -sf $TMP/perm.txt $TMP/link.txt
+if ./katzip $TMP/symonly.zip $TMP/link.txt 2>/dev/null; then echo "FAIL symonly should reject"; exit 1; fi
+echo "symlink filter: OK"
+# atomicity: existing archive not deleted on failure (duplicate triggers fail)
+echo "keep" > $TMP/keep_a.txt; ./katzip $TMP/keep.zip $TMP/keep_a.txt >/dev/null 2>&1
+cp $TMP/keep.zip $TMP/keep_before.zip
+mkdir -p $TMP/adup1 $TMP/adup2; echo a > $TMP/adup1/dup.txt; echo b > $TMP/adup2/dup.txt
+if ./katzip $TMP/keep.zip $TMP/adup1/dup.txt $TMP/adup2/dup.txt 2>/dev/null; then echo "FAIL should fail on duplicate"; exit 1; fi
+test -f $TMP/keep.zip
+python3 -c "import zipfile; z=zipfile.ZipFile('$TMP/keep_before.zip'); assert z.namelist()==zipfile.ZipFile('$TMP/keep.zip').namelist()"
+echo "atomic keep: OK"
+# archive mode 0644
+umask 0022; echo "mode" > $TMP/mode2.txt; ./katzip $TMP/mode2.zip $TMP/mode2.txt >/dev/null 2>&1
+python3 -c "import os, stat; mode=oct(os.stat('$TMP/mode2.zip').st_mode & 0o777); assert mode=='0o644', f'mode {mode} != 0o644'"
+echo "archive mode: OK"
+
 echo "ALL C TESTS PASSED"

@@ -92,7 +92,7 @@ Risk: bit-level bugs — fenced by mandatory round-trip check per entry.
   three enhanced tricks (precode search, Huffman multi-strategy, parser
   diversification) on our C Zopfli. Prefer the smaller diff that closes
   the measured gap.
-- Acceptance: corpus size strictly decreases vs Stage 1; `unzip -t` green. DONE: bench/corpus 27K katzip 12316 < zopfli 12384, 2M FB2 katzip 1426632 < ect 1426753.
+- Acceptance: corpus size strictly decreases vs Stage 1; `unzip -t` green. DONE: bench/corpus 27K katzip 12316 = zopfli 12316 (tie) < 7z 12384, 2M FB2 katzip 1426632 < ect 1426753.
 
 ### Stage 3 — Post-pass `deflate_polish()` (1–2 weeks).
 - Re-encode dynamic-block headers (full precode search à la deft4j),

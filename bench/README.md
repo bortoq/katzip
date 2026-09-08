@@ -1,7 +1,6 @@
 # bench — reproducible size regression
 
-Corpus: `bench/corpus/bench.txt` — 27k English text, seed=1 (same as audit).
-Generated deterministically via `bench/corpus/gen.py`.
+Corpus: `bench/corpus/bench.txt` — 27 024 B English text, seed=1 (similar to audit's 27 004 B, but generated from `/usr/share/dict/words` or 34-word fallback; `bench.txt` is committed so baseline is reproducible).
 
 Run:
 ```

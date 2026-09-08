@@ -11,6 +11,7 @@
 #include <time.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <zlib.h>
 
 /* ZIP file signatures and limits (from APPNOTE.TXT). */
@@ -23,6 +24,14 @@ static const uint32_t ZIP64_LIMIT_32 = 0xFFFFFFFFu;
 static const uint16_t ZIP_VERSION_DEFAULT = 20;
 static const uint16_t ZIP_VERSION_ZIP64 = 45;
 static const uint16_t FLAG_UTF8 = 0x800;
+
+static char *g_sig_tmp = NULL;
+static void sig_cleanup (int sig)
+{
+  if (g_sig_tmp) unlink (g_sig_tmp);
+  signal (sig, SIG_DFL);
+  raise (sig);
+}
 
 /* Little-endian writers — return false on I/O error. */
 static bool
@@ -160,7 +169,11 @@ zip_writer_open (zip_writer_t *writer, const char *path)
     if (!writer->tmp_path) { close(fd); unlink(tmpl); free(writer->archive_path); return false; }
     writer->file = fdopen (fd, "wb");
     if (!writer->file) { close(fd); unlink(tmpl); free(writer->tmp_path); free(writer->archive_path); return false; }
+    { mode_t cur = umask(0); umask(cur); fchmod(fd, 0666 & ~cur); }
     writer->tmp_created = true;
+    g_sig_tmp = writer->tmp_path;
+    signal (SIGINT, sig_cleanup);
+    signal (SIGTERM, sig_cleanup);
   }
   writer->capacity = 16;
   writer->entries = calloc (writer->capacity, sizeof *writer->entries);
@@ -274,6 +287,7 @@ zip_writer_add_file (zip_writer_t *writer,
   uint16_t dosdate=0, dostime=0;
   /* Caller should have provided mtime/mode via add_path; for direct add_file
      we use current time and 0644. */
+  if (!writer || writer->closed || !arcname || !data) return false;
   time_t mtime = time(NULL);
   mode_t mode = 0644;
   /* Check for duplicate arcname (P0-3) — linear scan, n is small. */
@@ -281,8 +295,6 @@ zip_writer_add_file (zip_writer_t *writer,
   if (!tmp_norm) return false;
   for (size_t i=0;i<writer->count;i++) if (strcmp(writer->entries[i].filename, tmp_norm)==0) { free(tmp_norm); return false; }
   free(tmp_norm);
-
-  if (!writer || writer->closed || !arcname || !data) return false;
   norm = normalize_name (arcname);
   if (!norm) return false;
   if (norm[strlen(norm)-1]=='/')
@@ -498,12 +510,13 @@ zip_writer_close (zip_writer_t *writer)
     {
       if (rename(writer->tmp_path, writer->archive_path)!=0) goto fail_rename;
       writer->tmp_created=false;
+      g_sig_tmp = NULL;
     }
   return true;
 fail:
   if (writer->file) { fclose(writer->file); writer->file=NULL; }
 fail_rename:
-  if (writer->tmp_created && writer->tmp_path) unlink(writer->tmp_path);
+  if (writer->tmp_created && writer->tmp_path) { unlink(writer->tmp_path); g_sig_tmp = NULL; }
   writer->closed=true;
   return false;
 }
@@ -515,7 +528,7 @@ zip_writer_free (zip_writer_t *writer)
   if (!writer) return;
   for (i=0;i<writer->count;i++) { free(writer->entries[i].filename); free(writer->entries[i].comp_data); }
   free(writer->entries); free(writer->offsets); free(writer->is_zip64);
-  if (writer->file) { fclose(writer->file); if (writer->tmp_created && writer->tmp_path) unlink(writer->tmp_path); }
+  if (writer->file) { fclose(writer->file); if (writer->tmp_created && writer->tmp_path) { unlink(writer->tmp_path); g_sig_tmp = NULL; } }
   free(writer->archive_path); free(writer->tmp_path);
   memset(writer,0,sizeof *writer);
 }
@@ -656,16 +669,16 @@ create_zip_archive (const char *archive, char **files, size_t nfiles)
   if (nitems==0)
     {
       free(items);
+      if (nfiles>0) { fprintf(stderr,"warning: no files to archive (all inputs filtered)\n"); return false; }
       if (!zip_writer_open(&writer, archive)) return false;
       ok=zip_writer_close(&writer);
       zip_writer_free(&writer);
-      if (!ok) unlink(archive);
       return ok;
     }
   /* P0-3: duplicate arcname check */
   for (i=0;i<nitems;i++)
     for (size_t j=i+1;j<nitems;j++)
-      if (strcmp(items[i].arcname, items[j].arcname)==0) { ok=false; goto dup_fail; }
+      if (strcmp(items[i].arcname, items[j].arcname)==0) { fprintf(stderr,"error: duplicate entry \"%s\"\n", items[i].arcname); ok=false; goto dup_fail; }
   /* P0-4: self-overwrite check (archive == any input file by dev/ino) */
   {
     struct stat ast;
@@ -673,10 +686,10 @@ create_zip_archive (const char *archive, char **files, size_t nfiles)
       for (i=0;i<nitems;i++)
         {
           struct stat fst;
-          if (lstat(items[i].fullpath,&fst)==0 && fst.st_dev==ast.st_dev && fst.st_ino==ast.st_ino) { ok=false; goto dup_fail; }
+          if (lstat(items[i].fullpath,&fst)==0 && fst.st_dev==ast.st_dev && fst.st_ino==ast.st_ino) { fprintf(stderr,"error: archive \"%s\" is also an input file\n", archive); ok=false; goto dup_fail; }
           /* Also check archive path string equality after realpath */
           char rarch[PATH_MAX], rfile[PATH_MAX];
-          if (realpath(archive,rarch) && realpath(items[i].fullpath,rfile) && strcmp(rarch,rfile)==0) { ok=false; goto dup_fail; }
+          if (realpath(archive,rarch) && realpath(items[i].fullpath,rfile) && strcmp(rarch,rfile)==0) { fprintf(stderr,"error: archive \"%s\" is also an input file\n", archive); ok=false; goto dup_fail; }
         }
   }
   if (!zip_writer_open(&writer, archive))
@@ -723,8 +736,7 @@ dup_fail:
       if (!best||!*best) best="Deflate";
       fprintf(stderr,"\r%s %zu bytes\n",best,total_comp); fflush(stderr);
     }
-  else { fprintf(stderr,"\n"); fflush(stderr); if (writer.tmp_created && writer.tmp_path) unlink(writer.tmp_path); else unlink(archive); }
+  else { fprintf(stderr,"\n"); fflush(stderr); if (writer.tmp_created && writer.tmp_path) unlink(writer.tmp_path); }
   zip_writer_free(&writer);
-  if (!ok) unlink(archive);
   return ok;
 }
