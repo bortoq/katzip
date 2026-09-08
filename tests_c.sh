@@ -156,10 +156,15 @@ cp $TMP/keep.zip $TMP/keep_before.zip
 python3 -c "import os; open('$TMP/big_atomic.txt','wb').write(os.urandom(5000))"
 # Use python to set RLIMIT_FSIZE=200 and exec katzip (fails after header, tests P0-1 + N-1)
 python3 - "$TMP/keep.zip" "$TMP/big_atomic.txt" << 'PY2'
-import resource, subprocess, sys, signal
-resource.setrlimit(resource.RLIMIT_FSIZE, (200, 200))
-signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-ret = subprocess.call(["./katzip", sys.argv[1], sys.argv[2]])
+import resource, subprocess, sys, signal, os
+def pre():
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (200, 200))
+    except: pass
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+ret = subprocess.call(["./katzip", sys.argv[1], sys.argv[2]], preexec_fn=pre)
+# Child killed by SIGXFSZ would return -25; treat as failure (keep should stay)
+# So success is ret != 0 (either 1 or negative)
 sys.exit(0 if ret!=0 else 1)
 PY2
 if [ $? -ne 0 ]; then echo "FAIL atomic RLIMIT should have failed"; exit 1; fi

@@ -11,6 +11,7 @@
 #include <time.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <zlib.h>
 
@@ -114,9 +115,11 @@ normalize_name (const char *arcname)
   size_t len;
   char *tmp;
   char *out;
-  size_t j, k;
+  size_t j;
+  bool is_dir;
   if (!arcname) return NULL;
   len = strlen (arcname);
+  is_dir = (len > 0 && (arcname[len-1] == '/' || arcname[len-1] == '\\'));
   tmp = malloc (len + 1);
   if (!tmp) return NULL;
   for (j = 0; j < len; j++)
@@ -125,14 +128,13 @@ normalize_name (const char *arcname)
       tmp[j] = (c == '\\' ? '/' : c);
     }
   tmp[len] = '\0';
-  out = malloc (len + 1);
-  if (!out) { free(tmp); return NULL; }
-  /* Split by '/', collapse, handle . and .. */
-  k = 0;
+  char **stack = malloc ((len + 1) * sizeof(char*));
+  size_t *slen = malloc ((len + 1) * sizeof(size_t));
+  size_t top = 0;
   size_t i = 0;
+  if (!stack || !slen) { free(tmp); free(stack); free(slen); return NULL; }
   while (i < len)
     {
-      /* skip slashes */
       while (i < len && tmp[i] == '/') i++;
       if (i >= len) break;
       size_t beg = i;
@@ -142,21 +144,26 @@ normalize_name (const char *arcname)
         continue;
       if (seglen == 2 && tmp[beg] == '.' && tmp[beg+1] == '.')
         {
-          /* Pop last segment if any */
-          if (k > 0)
-            {
-              /* find previous slash */
-              if (k > 1 && out[k-1] == '/') k--;
-              while (k > 0 && out[k-1] != '/') k--;
-            }
+          if (top > 0) top--;
           continue;
         }
-      if (k > 0) out[k++] = '/';
-      memcpy (out + k, tmp + beg, seglen);
-      k += seglen;
+      stack[top] = tmp + beg;
+      slen[top] = seglen;
+      top++;
     }
+  out = malloc (len + 2);
+  if (!out) { free(tmp); free(stack); free(slen); return NULL; }
+  size_t k = 0;
+  for (size_t t = 0; t < top; t++)
+    {
+      if (k > 0) out[k++] = '/';
+      memcpy (out + k, stack[t], slen[t]);
+      k += slen[t];
+    }
+  if (is_dir && k > 0 && out[k-1] != '/')
+    out[k++] = '/';
   out[k] = '\0';
-  free(tmp);
+  free(tmp); free(stack); free(slen);
   if (out[0] == '\0')
     {
       free (out);
@@ -203,6 +210,7 @@ zip_writer_open (zip_writer_t *writer, const char *path)
     g_sig_tmp = writer->tmp_path;
     signal (SIGINT, sig_cleanup);
     signal (SIGTERM, sig_cleanup);
+    signal (SIGXFSZ, sig_cleanup);
   }
   writer->capacity = 16;
   writer->entries = calloc (writer->capacity, sizeof *writer->entries);
@@ -540,12 +548,18 @@ zip_writer_close (zip_writer_t *writer)
       if (rename(writer->tmp_path, writer->archive_path)!=0) goto fail_rename;
       writer->tmp_created=false;
       g_sig_tmp = NULL;
+      signal (SIGINT, SIG_DFL);
+      signal (SIGTERM, SIG_DFL);
+      signal (SIGXFSZ, SIG_DFL);
     }
   return true;
 fail:
   if (writer->file) { fclose(writer->file); writer->file=NULL; }
 fail_rename:
   if (writer->tmp_created && writer->tmp_path) { unlink(writer->tmp_path); g_sig_tmp = NULL; }
+  signal (SIGINT, SIG_DFL);
+  signal (SIGTERM, SIG_DFL);
+  signal (SIGXFSZ, SIG_DFL);
   writer->closed=true;
   return false;
 }
@@ -557,7 +571,9 @@ zip_writer_free (zip_writer_t *writer)
   if (!writer) return;
   for (i=0;i<writer->count;i++) { free(writer->entries[i].filename); free(writer->entries[i].comp_data); }
   free(writer->entries); free(writer->offsets); free(writer->is_zip64);
-  if (writer->file) { fclose(writer->file); if (writer->tmp_created && writer->tmp_path) { unlink(writer->tmp_path); g_sig_tmp = NULL; } }
+  if (writer->tmp_created && writer->tmp_path) { unlink(writer->tmp_path); g_sig_tmp = NULL; }
+  if (writer->file) fclose(writer->file);
+  else if (g_sig_tmp) { g_sig_tmp = NULL; signal (SIGINT, SIG_DFL); signal (SIGTERM, SIG_DFL); }
   free(writer->archive_path); free(writer->tmp_path);
   memset(writer,0,sizeof *writer);
 }
@@ -746,9 +762,9 @@ dup_fail:
           /* Empty directory entry — preserve real mode, not hardcoded 0755. */
           uint16_t ddate, dtime;
           long off = ftell(writer.file);
-          bool need64 = false;
           if (off<0) { ok=false; break; }
           to_dos_time(dst.st_mtime, &ddate, &dtime);
+          bool need64 = ((uint64_t)off > ZIP64_LIMIT_32);
           if (!write_local_entry(&writer, items[i].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
           if (!ensure_capacity(&writer)) { ok=false; break; }
           writer.entries[writer.count].filename = strdup(items[i].arcname);
