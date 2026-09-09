@@ -1,6 +1,7 @@
 #include "competitor.h"
 #include "policy.h"
 #include "enhanced.h"
+#include <pthread.h>
 #include "config.h"
 
 #include <stdio.h>
@@ -72,6 +73,7 @@ static const int ZLIB_MEM_LEVEL = 9;
 static char g_last_desc[256] = "Store";
 static char g_best_overall_desc[256] = "Store";
 static size_t g_best_overall_saved = 0;
+static pthread_mutex_t g_best_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 const char *
 competitor_last_desc (void)
@@ -563,6 +565,65 @@ try_enhanced (const unsigned char *data, size_t len,
 
 /* ------------------------------------------------------------------ */
 
+/* Parallel candidate evaluation: one engine group per thread.
+   Each worker owns a private best (floor = input length) and merges it
+   into the shared best under a mutex with the same smaller-wins rule,
+   so parallel and sequential runs produce identical winners. */
+typedef struct {
+  const unsigned char *data;
+  size_t len;
+  int kind; /* 0=zlib, 1=libdeflate, 2=zopfli, 3=enhanced */
+  unsigned char **shared_best;
+  size_t *shared_len;
+  int *shared_method;
+  char *shared_desc;
+  pthread_mutex_t *lock;
+} cand_job_t;
+
+static void *
+cand_worker (void *arg)
+{
+  cand_job_t *job = (cand_job_t *) arg;
+  unsigned char *local_best = NULL;
+  size_t local_len = job->len;
+  int local_method = COMP_METHOD_STORE;
+  char local_desc[256] = { 0 };
+
+  if (job->kind == 0)
+    try_zlib_exhaustive (job->data, job->len,
+                         &local_best, &local_len, &local_method, local_desc);
+#ifdef HAVE_LIBDEFLATE
+  else if (job->kind == 1)
+    try_libdeflate_all (job->data, job->len,
+                        &local_best, &local_len, &local_method, local_desc);
+#endif
+  else if (job->kind == 2)
+    try_zopfli_max (job->data, job->len,
+                    &local_best, &local_len, &local_method, local_desc);
+  else if (job->kind == 3)
+    try_enhanced (job->data, job->len,
+                  &local_best, &local_len, &local_method, local_desc);
+
+  pthread_mutex_lock (job->lock);
+  if (local_best && local_len < *job->shared_len)
+    {
+      if (*job->shared_best)
+        free (*job->shared_best);
+      *job->shared_best = local_best;
+      *job->shared_len = local_len;
+      *job->shared_method = local_method;
+      strncpy (job->shared_desc, local_desc, 255);
+      job->shared_desc[255] = '\0';
+      local_best = NULL;
+    }
+  pthread_mutex_unlock (job->lock);
+  if (local_best)
+    free (local_best);
+  return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+
 bool
 competitor_compress (const unsigned char *data, size_t len,
                      const char *filename,
@@ -588,7 +649,9 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = 0;
       *method = COMP_METHOD_STORE;
+      pthread_mutex_lock (&g_best_mutex);
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      pthread_mutex_unlock (&g_best_mutex);
       report_progress (100);
       return true;
     }
@@ -602,7 +665,9 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = len;
       *method = COMP_METHOD_STORE;
+      pthread_mutex_lock (&g_best_mutex);
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      pthread_mutex_unlock (&g_best_mutex);
       report_progress (100);
       return true;
     }
@@ -617,11 +682,82 @@ competitor_compress (const unsigned char *data, size_t len,
   g_progress_range = 80;
   g_progress_max = 0;
 
-  try_zlib_exhaustive (data, len, &best, &best_len, &best_method, best_desc);
-
+  int nthreads = 1;
+  {
+    const katzip_config_t *cfg = config_get ();
+    if (cfg && cfg->threads != 1)
+      {
+        int t = cfg->threads;
+        if (t <= 0)
+          {
+            long n = sysconf (_SC_NPROCESSORS_ONLN);
+            if (n < 1)
+              n = 4;
+            t = (int) n;
+          }
+        nthreads = t;
+      }
+  }
+  if (nthreads > 1 && len > 4096)
+    {
+      /* One thread per engine group; each merges its private best. */
+      static const int kinds[] = { 0, 1, 2, 3 };
+      pthread_mutex_t best_lock = PTHREAD_MUTEX_INITIALIZER;
+      pthread_t tids[4];
+      cand_job_t jobs[4];
+      int nk = 4;
+      int k;
+      if (nthreads < nk)
+        nk = nthreads;
+      for (k = 0; k < nk; k++)
+        {
+          jobs[k].data = data;
+          jobs[k].len = len;
+          jobs[k].kind = kinds[k];
+          jobs[k].shared_best = &best;
+          jobs[k].shared_len = &best_len;
+          jobs[k].shared_method = &best_method;
+          jobs[k].shared_desc = best_desc;
+          jobs[k].lock = &best_lock;
+          if (pthread_create (&tids[k], NULL, cand_worker, &jobs[k]) != 0)
+            break;
+        }
+      nk = k; /* threads actually started */
+      {
+        int j;
+        for (j = 0; j < nk; j++)
+          pthread_join (tids[j], NULL);
+      }
+      pthread_mutex_destroy (&best_lock);
+      /* Any engine group not covered above runs sequentially. */
+      {
+        int j;
+        for (j = nk; j < 4; j++)
+          {
+            if (kinds[j] == 0)
+              try_zlib_exhaustive (data, len, &best, &best_len,
+                                   &best_method, best_desc);
 #ifdef HAVE_LIBDEFLATE
-  try_libdeflate_all (data, len, &best, &best_len, &best_method, best_desc);
+            else if (kinds[j] == 1)
+              try_libdeflate_all (data, len, &best, &best_len,
+                                  &best_method, best_desc);
 #endif
+            else if (kinds[j] == 2)
+              try_zopfli_max (data, len, &best, &best_len,
+                              &best_method, best_desc);
+            else if (kinds[j] == 3)
+              try_enhanced (data, len, &best, &best_len,
+                            &best_method, best_desc);
+          }
+      }
+    }
+  else
+    {
+      try_zlib_exhaustive (data, len, &best, &best_len, &best_method, best_desc);
+#ifdef HAVE_LIBDEFLATE
+      try_libdeflate_all (data, len, &best, &best_len, &best_method, best_desc);
+#endif
+    }
 
   /* Extra strategy for very small files mimics AdvanceCOMP retry.
      Honors the configured level range and strategy set. */
@@ -665,7 +801,9 @@ competitor_compress (const unsigned char *data, size_t len,
       *out = buf;
       *out_len = len;
       *method = COMP_METHOD_STORE;
+      pthread_mutex_lock (&g_best_mutex);
       strncpy (g_last_desc, "Store", sizeof g_last_desc);
+      pthread_mutex_unlock (&g_best_mutex);
       report_progress (100);
       return true;
     }
@@ -673,17 +811,21 @@ competitor_compress (const unsigned char *data, size_t len,
   *out = best;
   *out_len = best_len;
   *method = best_method;
+  pthread_mutex_lock (&g_best_mutex);
   strncpy (g_last_desc, best_desc, sizeof g_last_desc);
+  pthread_mutex_unlock (&g_best_mutex);
   report_progress (100);
 
   /* Track overall best for final summary (largest saving). */
   {
     size_t saved = len > best_len ? len - best_len : 0;
+    pthread_mutex_lock(&g_best_mutex);
     if (saved > g_best_overall_saved)
       {
         g_best_overall_saved = saved;
         strncpy (g_best_overall_desc, best_desc, sizeof g_best_overall_desc);
       }
+    pthread_mutex_unlock(&g_best_mutex);
   }
 
   return true;

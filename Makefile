@@ -1,7 +1,7 @@
 CC = gcc
-CFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-stringop-truncation -Wno-stringop-overflow -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
+CFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-stringop-truncation -Wno-stringop-overflow -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src -pthread
 ZOPFLI_CFLAGS = -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
-LDFLAGS = -lm -lz
+LDFLAGS = -lm -lz -pthread
 HAVE_DEFLATE = $(shell test -f /usr/include/libdeflate.h && echo 1 || echo 0)
 ifeq ($(HAVE_DEFLATE),1)
 CFLAGS += -DHAVE_LIBDEFLATE

@@ -70,6 +70,7 @@ typedef struct
   int enh_merge_blocks;
   int enh_kzip_split;
   int enh_recode_iters;
+  int threads; /* 0=auto, 1=single, N=max */
 } katzip_config_t;
 
 /* Fill with built-in defaults. Guarded: NULL is a no-op. */

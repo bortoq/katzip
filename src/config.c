@@ -84,6 +84,7 @@ config_defaults (katzip_config_t *cfg)
   cfg->enh_merge_blocks = 1;
   cfg->enh_kzip_split = 1;
   cfg->enh_recode_iters = 500;
+  cfg->threads = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -435,6 +436,10 @@ set_key (katzip_config_t *cfg, const char *section,
     set_zopfli_key (cfg, key, val);
   else if (!strcmp (section, "enhanced"))
     set_enhanced_key (cfg, key, val);
+  else if (!strcmp (section, "core"))
+    {
+      int x; if (!strcmp (key, "threads") && parse_int (val, &x)) cfg->threads = x;
+    }
 }
 
 

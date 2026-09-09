@@ -1,5 +1,6 @@
 #include "archiver.h"
 #include "competitor.h"
+#include "config.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <pthread.h>
 #include <zlib.h>
 
 /* ZIP file signatures and limits (from APPNOTE.TXT). */
@@ -669,6 +671,161 @@ collect_one (const char *path, const char *base_parent,
     }
 }
 
+static int get_thread_count (size_t nitems)
+{
+  const katzip_config_t *cfg = config_get();
+  int t = cfg ? cfg->threads : 0;
+  if (t == 1) return 1;
+  if (t <= 0) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 4;
+    t = (int)n;
+  }
+  if ((size_t)t > nitems) t = (int)nitems;
+  if (t < 1) t = 1;
+  return t;
+}
+
+typedef struct {
+  file_item_t *items;
+  size_t nitems;
+  size_t next;
+  pthread_mutex_t lock;
+  zip_writer_t *writer;
+  bool *ok;
+  size_t *total_comp;
+  pthread_mutex_t *print_lock;
+  int *completed;
+} file_pool_t;
+
+static void *file_worker (void *arg)
+{
+  file_pool_t *pool = (file_pool_t*)arg;
+  while (1) {
+    size_t idx;
+    pthread_mutex_lock(&pool->lock);
+    if (pool->next >= pool->nitems) { pthread_mutex_unlock(&pool->lock); break; }
+    idx = pool->next++;
+    pthread_mutex_unlock(&pool->lock);
+    // Check if already failed
+    if (!*pool->ok) continue;
+    // Handle dir already? For file items, check if dir
+    struct stat dst;
+    if (lstat(pool->items[idx].fullpath, &dst)==0 && S_ISDIR(dst.st_mode)) {
+      // empty dir already handled via items, treat as success
+      pthread_mutex_lock(pool->print_lock);
+      int pct = (int)((__atomic_add_fetch(pool->completed, 1, __ATOMIC_SEQ_CST) * 100) / pool->nitems);
+      fprintf(stderr, "%d%%\r", pct);
+      fflush(stderr);
+      pthread_mutex_unlock(pool->print_lock);
+      continue;
+    }
+    // For regular file, compress via add_path (which will also handle dedup? dedup already checked)
+    // We need to call zip_writer_add_path but writer is shared - we need per-thread writer?
+    // Instead, we compress via competitor directly and store result in a separate array, then main writes.
+    // For now, just use add_path with mutex on writer
+    pthread_mutex_lock(pool->print_lock);
+    // not actually writing yet, just compress
+    pthread_mutex_unlock(pool->print_lock);
+    // The actual compress+write will be done sequentially after parallel compress phase
+    // This worker is placeholder - real parallel compress will be done via separate array
+    // To avoid complexity, we will handle parallel compress in create_zip_archive directly
+    break;
+  }
+  return NULL;
+}
+
+
+typedef struct {
+  unsigned char *comp;
+  size_t comp_len;
+  int method;
+  unsigned int crc;
+  unsigned int st_mode;
+  long long mtime;
+  size_t data_len;
+  bool is_dir;
+  bool ok;
+} file_result_t;
+
+typedef struct {
+  file_item_t *items;
+  size_t nitems;
+  file_result_t *results;
+  size_t *next;
+  pthread_mutex_t *next_lock;
+  pthread_mutex_t *print_lock;
+  int *completed;
+  bool *overall_ok;
+} file_pool_ctx_t;
+
+static void *file_compress_worker (void *arg)
+{
+  file_pool_ctx_t *ctx = (file_pool_ctx_t*)arg;
+  while (1) {
+    size_t idx;
+    pthread_mutex_lock(ctx->next_lock);
+    if (*ctx->next >= ctx->nitems) { pthread_mutex_unlock(ctx->next_lock); break; }
+    idx = (*ctx->next)++;
+    pthread_mutex_unlock(ctx->next_lock);
+    if (!*ctx->overall_ok) continue;
+    struct stat st;
+    if (lstat(ctx->items[idx].fullpath, &st)!=0) { ctx->results[idx].ok = false; *ctx->overall_ok = false; continue; }
+    if (S_ISLNK(st.st_mode)) { ctx->results[idx].ok = true; ctx->results[idx].is_dir = false; ctx->results[idx].data_len = 0; continue; }
+    if (S_ISDIR(st.st_mode)) {
+      ctx->results[idx].ok = true;
+      ctx->results[idx].is_dir = true;
+      ctx->results[idx].st_mode = st.st_mode & 07777;
+      ctx->results[idx].mtime = (long long)st.st_mtime;
+      ctx->results[idx].data_len = 0;
+      ctx->results[idx].comp_len = 0;
+      ctx->results[idx].method = 0;
+      ctx->results[idx].crc = 0;
+      ctx->results[idx].comp = NULL;
+    } else if (!S_ISREG(st.st_mode)) {
+      // non-regular already filtered in collect, but handle
+      ctx->results[idx].ok = true;
+      ctx->results[idx].is_dir = false;
+      ctx->results[idx].data_len = 0;
+      continue;
+    } else {
+      // regular file: read and compress
+      FILE *in = fopen(ctx->items[idx].fullpath, "rb");
+      if (!in) { ctx->results[idx].ok = false; *ctx->overall_ok = false; continue; }
+      size_t len = (size_t)st.st_size;
+      unsigned char *data = malloc(len?len:1);
+      if (!data) { fclose(in); ctx->results[idx].ok = false; *ctx->overall_ok = false; continue; }
+      if (len && fread(data,1,len,in)!=len) { free(data); fclose(in); ctx->results[idx].ok = false; *ctx->overall_ok = false; continue; }
+      fclose(in);
+      unsigned int crc = 0;
+      if (len) { crc = crc32(0L, Z_NULL, 0); size_t off=0; while(off<len){size_t chunk=len-off>1048576?1048576:len-off; crc=crc32(crc, data+off, (uInt)chunk); off+=chunk;}}
+      unsigned char *comp=NULL; size_t comp_len=0; int method=0;
+      bool cok = false;
+      if (len==0) { comp=NULL; comp_len=0; method=0; cok=true; }
+      else cok = competitor_compress(data, len, ctx->items[idx].arcname, &comp, &comp_len, &method);
+      free(data);
+      if (!cok) { free(comp); ctx->results[idx].ok = false; *ctx->overall_ok = false; continue; }
+      ctx->results[idx].ok = true;
+      ctx->results[idx].is_dir = false;
+      ctx->results[idx].comp = comp;
+      ctx->results[idx].comp_len = comp_len;
+      ctx->results[idx].method = method;
+      ctx->results[idx].crc = crc;
+      ctx->results[idx].st_mode = st.st_mode & 07777;
+      ctx->results[idx].mtime = (long long)st.st_mtime;
+      ctx->results[idx].data_len = len;
+    }
+    // progress
+    pthread_mutex_lock(ctx->print_lock);
+    int done = __atomic_add_fetch(ctx->completed, 1, __ATOMIC_SEQ_CST);
+    int pct = (int)(done * 100 / (int)ctx->nitems);
+    fprintf(stderr, "%d%%\r", pct);
+    fflush(stderr);
+    pthread_mutex_unlock(ctx->print_lock);
+  }
+  return NULL;
+}
+
 bool
 create_zip_archive (const char *archive, char **files, size_t nfiles)
 {
@@ -749,40 +906,173 @@ dup_fail:
       for (i=0;i<nitems;i++) { free(items[i].arcname); free(items[i].fullpath); }
       free(items); return false;
     }
-  /* Second pass: compress each file with progress. */
+  /* Second pass: compress each file.
+     For single file show block-wise progress via callback,
+     otherwise per-file progress. File-level parallelism when threads>1. */
   bool single_file = (nitems==1);
-  if (single_file) { g_last_pct=-1; competitor_set_progress_cb(single_file_progress_cb,NULL); }
-  for (i=0;i<nitems;i++)
+  int nthreads = get_thread_count(nitems);
+  if (single_file)
     {
-      struct stat dst;
-      if (!single_file) { int pct=(int)((i+1)*100/nitems); fprintf(stderr,"%d%%\r",pct); fflush(stderr); }
-      else { fprintf(stderr,"0%%\r"); fflush(stderr); }
-      if (lstat(items[i].fullpath,&dst)==0 && S_ISDIR(dst.st_mode))
+      g_last_pct=-1;
+      competitor_set_progress_cb(single_file_progress_cb,NULL);
+      for (size_t ii=0;ii<nitems;ii++)
         {
-          /* Empty directory entry — preserve real mode, not hardcoded 0755. */
-          uint16_t ddate, dtime;
-          long off = ftell(writer.file);
-          if (off<0) { ok=false; break; }
-          to_dos_time(dst.st_mtime, &ddate, &dtime);
-          bool need64 = ((uint64_t)off > ZIP64_LIMIT_32);
-          if (!write_local_entry(&writer, items[i].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
-          if (!ensure_capacity(&writer)) { ok=false; break; }
-          writer.entries[writer.count].filename = strdup(items[i].arcname);
-          writer.entries[writer.count].comp_data = NULL;
-          writer.entries[writer.count].data_len = 0;
-          writer.entries[writer.count].comp_len = 0;
-          writer.entries[writer.count].method = COMP_METHOD_STORE;
-          writer.entries[writer.count].crc = 0;
-          writer.entries[writer.count].st_mode = dst.st_mode & 07777;
-          writer.entries[writer.count].mtime = (long long)dst.st_mtime;
-          writer.offsets[writer.count]=off;
-          writer.is_zip64[writer.count]=need64;
-          if (!writer.entries[writer.count].filename) { ok=false; break; }
-          writer.count++;
+          fprintf(stderr,"0%%\r"); fflush(stderr);
+          struct stat dst;
+          if (lstat(items[ii].fullpath,&dst)==0 && S_ISDIR(dst.st_mode))
+            {
+              uint16_t ddate, dtime;
+              long off = ftell(writer.file);
+              if (off<0) { ok=false; break; }
+              to_dos_time(dst.st_mtime, &ddate, &dtime);
+              bool need64 = ((uint64_t)off > ZIP64_LIMIT_32);
+              if (!write_local_entry(&writer, items[ii].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
+              if (!ensure_capacity(&writer)) { ok=false; break; }
+              writer.entries[writer.count].filename = strdup(items[ii].arcname);
+              writer.entries[writer.count].comp_data = NULL;
+              writer.entries[writer.count].data_len = 0;
+              writer.entries[writer.count].comp_len = 0;
+              writer.entries[writer.count].method = COMP_METHOD_STORE;
+              writer.entries[writer.count].crc = 0;
+              writer.entries[writer.count].st_mode = dst.st_mode & 07777;
+              writer.entries[writer.count].mtime = (long long)dst.st_mtime;
+              writer.offsets[writer.count]=off;
+              writer.is_zip64[writer.count]=need64;
+              if (!writer.entries[writer.count].filename) { ok=false; break; }
+              writer.count++;
+            }
+          else if (!zip_writer_add_path(&writer, items[ii].arcname, items[ii].fullpath)) { ok=false; break; }
         }
-      else if (!zip_writer_add_path(&writer, items[i].arcname, items[i].fullpath)) { ok=false; break; }
+      competitor_set_progress_cb(NULL,NULL);
     }
-  if (single_file) competitor_set_progress_cb(NULL,NULL);
+  else if (nthreads > 1 && nitems > 1)
+    {
+      /* Parallel file compression: compress in threads, write sequentially. */
+      file_result_t *results = calloc(nitems, sizeof(file_result_t));
+      if (!results) ok=false;
+      else
+        {
+          // Ensure writer capacity for all entries
+          while (writer.capacity < nitems) if (!ensure_capacity(&writer)) { ok=false; break; }
+          if (ok)
+            {
+              pthread_t *tids = malloc(nthreads * sizeof(pthread_t));
+              size_t next = 0;
+              pthread_mutex_t next_lock = PTHREAD_MUTEX_INITIALIZER;
+              pthread_mutex_t print_lock = PTHREAD_MUTEX_INITIALIZER;
+              int completed = 0;
+              file_pool_ctx_t ctx;
+              ctx.items = items;
+              ctx.nitems = nitems;
+              ctx.results = results;
+              ctx.next = &next;
+              ctx.next_lock = &next_lock;
+              ctx.print_lock = &print_lock;
+              ctx.completed = &completed;
+              ctx.overall_ok = &ok;
+              // Need to pass ctx correctly - use global for this phase
+              // Create threads
+              for (int t=0; t<nthreads; t++) {
+                if (pthread_create(&tids[t], NULL, file_compress_worker, &ctx)!=0) { ok=false; break; }
+              }
+              for (int t=0; t<nthreads; t++) pthread_join(tids[t], NULL);
+              free(tids);
+              pthread_mutex_destroy(&next_lock);
+              pthread_mutex_destroy(&print_lock);
+              if (ok) {
+                for (size_t ii=0; ii<nitems; ii++) {
+                  if (!results[ii].ok) { ok=false; break; }
+                  // Skip filtered entries (symlink etc) - they have data_len 0 and no comp and not dir
+                  if (!results[ii].is_dir && results[ii].data_len==0 && results[ii].comp==NULL) {
+                    struct stat st2;
+                    if (lstat(items[ii].fullpath,&st2)==0 && (S_ISLNK(st2.st_mode) || !S_ISREG(st2.st_mode))) continue;
+                    // Empty regular file: data_len 0 but should be written (is_dir false, but size 0)
+                    // Distinguish by checking original file size
+                    struct stat st3;
+                    if (lstat(items[ii].fullpath,&st3)==0 && S_ISREG(st3.st_mode) && st3.st_size==0) {
+                      // empty file - write it
+                    } else if (!results[ii].is_dir) {
+                      continue;
+                    }
+                  }
+                  if (results[ii].is_dir) {
+                    uint16_t ddate, dtime;
+                    long off = ftell(writer.file);
+                    if (off<0) { ok=false; break; }
+                    to_dos_time((time_t)results[ii].mtime, &ddate, &dtime);
+                    bool need64 = ((uint64_t)off > ZIP64_LIMIT_32);
+                    if (!write_local_entry(&writer, items[ii].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
+                    writer.entries[writer.count].filename = strdup(items[ii].arcname);
+                    writer.entries[writer.count].comp_data = NULL;
+                    writer.entries[writer.count].data_len = 0;
+                    writer.entries[writer.count].comp_len = 0;
+                    writer.entries[writer.count].method = COMP_METHOD_STORE;
+                    writer.entries[writer.count].crc = 0;
+                    writer.entries[writer.count].st_mode = results[ii].st_mode;
+                    writer.entries[writer.count].mtime = results[ii].mtime;
+                    writer.offsets[writer.count]=off;
+                    writer.is_zip64[writer.count]=need64;
+                    if (!writer.entries[writer.count].filename) { ok=false; break; }
+                    writer.count++;
+                  } else {
+                    long off = ftell(writer.file);
+                    if (off<0) { ok=false; break; }
+                    uint16_t ddate, dtime;
+                    to_dos_time((time_t)results[ii].mtime, &ddate, &dtime);
+                    bool need64 = (results[ii].data_len > ZIP64_LIMIT_32 || results[ii].comp_len > ZIP64_LIMIT_32 || (uint64_t)off > ZIP64_LIMIT_32);
+                    if (!write_local_entry(&writer, items[ii].arcname, results[ii].comp?results[ii].comp:(unsigned char*)"", results[ii].comp_len, results[ii].data_len, results[ii].crc, results[ii].method, need64, off, ddate, dtime)) { ok=false; break; }
+                    writer.entries[writer.count].filename = strdup(items[ii].arcname);
+                    writer.entries[writer.count].comp_data = results[ii].comp;
+                    writer.entries[writer.count].data_len = results[ii].data_len;
+                    writer.entries[writer.count].comp_len = results[ii].comp_len;
+                    writer.entries[writer.count].method = results[ii].method;
+                    writer.entries[writer.count].crc = results[ii].crc;
+                    writer.entries[writer.count].st_mode = results[ii].st_mode;
+                    writer.entries[writer.count].mtime = results[ii].mtime;
+                    writer.offsets[writer.count]=off;
+                    writer.is_zip64[writer.count]=need64;
+                    if (!writer.entries[writer.count].filename) { ok=false; break; }
+                    writer.count++;
+                    results[ii].comp = NULL;
+                  }
+                }
+              }
+              for (size_t ii=0; ii<nitems; ii++) if (results[ii].comp) free(results[ii].comp);
+            }
+          free(results);
+        }
+    }
+  else
+    {
+      for (size_t ii=0;ii<nitems;ii++)
+        {
+          int pct=(int)((ii+1)*100/nitems); fprintf(stderr,"%d%%\r",pct); fflush(stderr);
+          struct stat dst;
+          if (lstat(items[ii].fullpath,&dst)==0 && S_ISDIR(dst.st_mode))
+            {
+              uint16_t ddate, dtime;
+              long off = ftell(writer.file);
+              if (off<0) { ok=false; break; }
+              to_dos_time(dst.st_mtime, &ddate, &dtime);
+              bool need64 = ((uint64_t)off > ZIP64_LIMIT_32);
+              if (!write_local_entry(&writer, items[ii].arcname, (unsigned char*)"", 0, 0, 0, COMP_METHOD_STORE, need64, off, ddate, dtime)) { ok=false; break; }
+              if (!ensure_capacity(&writer)) { ok=false; break; }
+              writer.entries[writer.count].filename = strdup(items[ii].arcname);
+              writer.entries[writer.count].comp_data = NULL;
+              writer.entries[writer.count].data_len = 0;
+              writer.entries[writer.count].comp_len = 0;
+              writer.entries[writer.count].method = COMP_METHOD_STORE;
+              writer.entries[writer.count].crc = 0;
+              writer.entries[writer.count].st_mode = dst.st_mode & 07777;
+              writer.entries[writer.count].mtime = (long long)dst.st_mtime;
+              writer.offsets[writer.count]=off;
+              writer.is_zip64[writer.count]=need64;
+              if (!writer.entries[writer.count].filename) { ok=false; break; }
+              writer.count++;
+            }
+          else if (!zip_writer_add_path(&writer, items[ii].arcname, items[ii].fullpath)) { ok=false; break; }
+        }
+    }
   for (i=0;i<nitems;i++) { free(items[i].arcname); free(items[i].fullpath); }
   free(items);
   if (ok)
