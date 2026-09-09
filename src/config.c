@@ -33,6 +33,7 @@ config_defaults (katzip_config_t *cfg)
   cfg->entropy_limit = 7.85;
   cfg->entropy_sample = 32768;
   cfg->store_high_entropy = 1;
+  cfg->try_gated = 1;
   for (i = 0; default_extensions[i] != NULL
               && i < KATZIP_MAX_SKIP_EXT; i++)
     {
@@ -244,6 +245,8 @@ set_policy_key (katzip_config_t *cfg, const char *key, const char *val)
     cfg->entropy_sample = z;
   else if (!strcmp (key, "store_high_entropy") && parse_bool (val, &b))
     cfg->store_high_entropy = b;
+  else if (!strcmp (key, "try_gated") && parse_bool (val, &b))
+    cfg->try_gated = b;
   else if (!strcmp (key, "skip_extensions"))
     {
       char buf[512];

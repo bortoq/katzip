@@ -21,6 +21,7 @@ typedef struct
   double entropy_limit;      /* bits/byte above: store */
   size_t entropy_sample;     /* bytes sampled for entropy */
   int store_high_entropy;    /* bool */
+  int try_gated;             /* bool: cheap contest for gated files */
   char skip_ext[KATZIP_MAX_SKIP_EXT][KATZIP_EXT_LEN];
   int n_skip_ext;
 

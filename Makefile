@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-stringop-truncation -Wno-stringop-overflow -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src -pthread
-ZOPFLI_CFLAGS = -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src
+CFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-stringop-truncation -Wno-stringop-overflow -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src -pthread -MMD -MP
+ZOPFLI_CFLAGS = -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ithird_party/zopfli/src -MMD -MP
 LDFLAGS = -lm -lz -pthread
 HAVE_DEFLATE = $(shell test -f /usr/include/libdeflate.h && echo 1 || echo 0)
 ifeq ($(HAVE_DEFLATE),1)
@@ -23,6 +23,7 @@ ZOPFLI_SRCS = third_party/zopfli/src/zopfli/blocksplitter.c \
 
 SRCS = src/policy.c src/config.c src/enhanced.c src/competitor.c src/archiver.c src/main.c $(ZOPFLI_SRCS)
 OBJS = $(SRCS:.c=.o)
+DEPS = $(OBJS:.o=.d)
 TARGET = katzip
 STATIC_TARGET = katzip_static
 
@@ -41,7 +42,7 @@ static: $(OBJS)
 	$(CC) $(OBJS) -o $(STATIC_TARGET) -static $(LDFLAGS) -lm
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(STATIC_TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET) $(STATIC_TARGET)
 
 test: $(TARGET)
 	./tests_c.sh
@@ -52,3 +53,7 @@ install: $(TARGET)
 	install -m 644 katzip.ini /usr/local/etc/katzip.ini.example
 
 .PHONY: all clean test install static
+
+# Header dependencies (must stay last: an -include before the
+# first target would hijack the default goal).
+-include $(DEPS)

@@ -175,6 +175,24 @@ normalize_name (const char *arcname)
   return out;
 }
 
+/* Canonicalize an archive name in place (canonical form never grows).
+   Used at collect time so dedup and all later stages see identical names
+   in single-threaded and parallel modes. */
+static bool
+canonicalize_arc (char *arc, size_t size)
+{
+  char *c;
+  if (!arc || size == 0)
+    return false;
+  c = normalize_name (arc);
+  if (!c)
+    return false;
+  strncpy (arc, c, size - 1);
+  arc[size - 1] = '\0';
+  free (c);
+  return arc[0] != '\0';
+}
+
 /* ------------------------------------------------------------------ */
 /* Writer lifecycle — tmpfile + rename for atomicity (P0-4, P1-9) */
 
@@ -785,6 +803,7 @@ collect_one (const char *path, const char *base_parent,
           size_t alen=strlen(arc);
           if (alen==0) return true;
           if (arc[alen-1]!='/') { if (alen+1>=sizeof arc) return false; arc[alen]='/'; arc[alen+1]='\0'; }
+          if (!canonicalize_arc (arc, sizeof arc)) return false;
           if (*count >= *cap)
             {
               size_t ncap = *cap ? *cap*2 : 16;
@@ -812,6 +831,7 @@ collect_one (const char *path, const char *base_parent,
       while (rel[0]=='.' && rel[1]=='/') rel+=2;
       strncpy(arc, rel, sizeof arc -1); arc[sizeof arc -1]='\0';
       for (char *p=arc;*p;p++) if (*p=='\\') *p='/';
+      if (!canonicalize_arc (arc, sizeof arc)) return false;
       if (*count >= *cap)
         {
           size_t ncap = *cap ? *cap*2 : 16;
@@ -1002,6 +1022,15 @@ create_zip_archive (const char *archive, char **files, size_t nfiles)
           const char *arc=base?base+1:p;
           char *a_dup=strdup(arc); char *p_dup=strdup(p);
           if (!a_dup||!p_dup) { free(a_dup); free(p_dup); ok=false; break; }
+          {
+            char tmp[4096];
+            strncpy (tmp, a_dup, sizeof tmp - 1);
+            tmp[sizeof tmp - 1] = '\0';
+            if (!canonicalize_arc (tmp, sizeof tmp)) { free(a_dup); free(p_dup); ok=false; break; }
+            free (a_dup);
+            a_dup = strdup (tmp);
+            if (!a_dup) { free(p_dup); ok=false; break; }
+          }
           if (nitems >= cap)
             {
               size_t ncap=cap?cap*2:16;

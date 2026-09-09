@@ -1,5 +1,6 @@
 # build
 *.o
+*.d
 katzip
 katzip_static
 maxzip_c

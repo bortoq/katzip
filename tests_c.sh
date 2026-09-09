@@ -56,10 +56,25 @@ for i in z.infolist():
 "
 echo "directory: OK"
 
-# 6. incompressible store (jpg)
-./katzip $TMP/jpg $TMP/src/c.jpg
-python3 -c "import zipfile; p='$TMP/jpg.zip'; z=zipfile.ZipFile(p); i=z.getinfo(z.namelist()[0]); assert i.compress_type==0, 'jpg should be stored'"
+# 6. incompressible store (true random .jpg still stores: floor preserved)
+head -c 8000 /dev/urandom > $TMP/rnd.jpg
+./katzip $TMP/jpg $TMP/rnd.jpg
+python3 -c "import zipfile; p='$TMP/jpg.zip'; z=zipfile.ZipFile(p); i=z.getinfo(z.namelist()[0]); assert i.compress_type==0, 'random jpg should be stored'"
 echo "incompressible: OK"
+# 6b. gated contest: compressible .jpg runs cheap contest, not blind store
+./katzip $TMP/gated $TMP/src/c.jpg
+python3 -c "
+import zipfile, os
+p='$TMP/gated.zip'; z=zipfile.ZipFile(p); i=z.getinfo(z.namelist()[0])
+plain=os.path.getsize('$TMP/src/c.jpg')
+assert i.compress_type==8 and i.compress_size < plain, 'gated jpg should deflate via cheap contest'
+"
+echo "gated-contest: OK"
+# 6c. try_gated=off restores blind store
+printf '[policy]\ntry_gated = off\n' > $TMP/goff.ini
+KATZIP_INI=$TMP/goff.ini ./katzip $TMP/goff $TMP/src/c.jpg
+python3 -c "import zipfile; p='$TMP/goff.zip'; z=zipfile.ZipFile(p); i=z.getinfo(z.namelist()[0]); assert i.compress_type==0, 'try_gated=off should store'"
+echo "gated-off: OK"
 
 # 7. COMPRESSION REGRESSION: katzip must beat zip -9 and 7z -mx9
 python3 -c "open('$TMP/text.txt','w').write('Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor. '*2000)"
@@ -135,6 +150,15 @@ echo "mtime: OK"
 mkdir -p $TMP/d1 $TMP/d2; echo one > $TMP/d1/x.txt; echo two > $TMP/d2/x.txt
 if ./katzip $TMP/dup.zip $TMP/d1/x.txt $TMP/d2/x.txt 2>/dev/null; then echo "FAIL dup should reject"; exit 1; fi
 echo "duplicate: OK"
+# duplicate via non-canonical paths must fail in BOTH thread modes (audit 100a547 P1)
+mkdir -p $TMP/tdup/a/b $TMP/tdup/td; echo foo > $TMP/tdup/a/b/f.txt; echo bar > $TMP/tdup/td/f.txt
+printf '[core]\nthreads=1\n' > $TMP/t1.ini; printf '[core]\nthreads=4\n' > $TMP/t4.ini
+if KATZIP_INI=$TMP/t1.ini ./katzip $TMP/dup1.zip $TMP/tdup/a/b $TMP/tdup/a/b/../b 2>/dev/null; then echo "FAIL dup-dotdot t1 should reject"; exit 1; fi
+if KATZIP_INI=$TMP/t4.ini ./katzip $TMP/dup2.zip $TMP/tdup/a/b $TMP/tdup/a/b/../b 2>/dev/null; then echo "FAIL dup-dotdot t4 should reject"; exit 1; fi
+if KATZIP_INI=$TMP/t1.ini ./katzip $TMP/dup3.zip $TMP/tdup/td $TMP/tdup/td/ 2>/dev/null; then echo "FAIL dup-slash t1 should reject"; exit 1; fi
+if KATZIP_INI=$TMP/t4.ini ./katzip $TMP/dup4.zip $TMP/tdup/td $TMP/tdup/td/ 2>/dev/null; then echo "FAIL dup-slash t4 should reject"; exit 1; fi
+test ! -f $TMP/dup1.zip; test ! -f $TMP/dup2.zip; test ! -f $TMP/dup3.zip; test ! -f $TMP/dup4.zip
+echo "duplicate-canonical: OK"
 # self-overwrite
 cp $TMP/perm.txt $TMP/self.zip
 if ./katzip $TMP/self.zip $TMP/self.zip 2>/dev/null; then echo "FAIL self should reject"; exit 1; fi

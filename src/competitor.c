@@ -716,18 +716,77 @@ competitor_compress (const unsigned char *data, size_t len,
 
   if (policy_should_store_only (filename, data, len))
     {
-      unsigned char *buf = malloc (len);
-      if (!buf)
-        return false;
-      memcpy (buf, data, len);
-      *out = buf;
-      *out_len = len;
-      *method = COMP_METHOD_STORE;
-      pthread_mutex_lock (&g_best_mutex);
-      strncpy (g_last_desc, "Store", sizeof g_last_desc);
-      pthread_mutex_unlock (&g_best_mutex);
-      report_progress (100);
-      return true;
+      const katzip_config_t *cfg = config_get ();
+      /* Gated files (skip-list extensions, high entropy): run only the
+         cheap contest (zlib + libdeflate, sub-second) with a Store floor
+         instead of blindly storing. Real-world JPEGs often hide 1-2% that
+         ECT-class tools collect; the heavy engines stay gated for speed.
+         try_gated=off restores the old blind-store behavior. */
+      if (cfg && cfg->try_gated && len > 0)
+        {
+          unsigned char *best = NULL;
+          size_t best_len = len;
+          int best_method = COMP_METHOD_STORE;
+          char best_desc[256] = "Store";
+          strncpy (best_desc, "Store", sizeof best_desc - 1);
+          try_zlib_exhaustive (data, len, &best, &best_len,
+                               &best_method, best_desc);
+#ifdef HAVE_LIBDEFLATE
+          try_libdeflate_all (data, len, &best, &best_len,
+                              &best_method, best_desc);
+#endif
+          if (!best || best_len >= len)
+            {
+              unsigned char *buf;
+              if (best)
+                free (best);
+              buf = malloc (len ? len : 1);
+              if (!buf)
+                return false;
+              if (len)
+                memcpy (buf, data, len);
+              *out = buf;
+              *out_len = len;
+              *method = COMP_METHOD_STORE;
+              pthread_mutex_lock (&g_best_mutex);
+              strncpy (g_last_desc, "Store", sizeof g_last_desc);
+              pthread_mutex_unlock (&g_best_mutex);
+              report_progress (100);
+              return true;
+            }
+          *out = best;
+          *out_len = best_len;
+          *method = best_method;
+          pthread_mutex_lock (&g_best_mutex);
+          strncpy (g_last_desc, best_desc, sizeof g_last_desc);
+          {
+            size_t saved = len > best_len ? len - best_len : 0;
+            if (saved > g_best_overall_saved)
+              {
+                g_best_overall_saved = saved;
+                strncpy (g_best_overall_desc, best_desc,
+                         sizeof g_best_overall_desc);
+              }
+          }
+          pthread_mutex_unlock (&g_best_mutex);
+          report_progress (100);
+          return true;
+        }
+      {
+        unsigned char *buf = malloc (len ? len : 1);
+        if (!buf)
+          return false;
+        if (len)
+          memcpy (buf, data, len);
+        *out = buf;
+        *out_len = len;
+        *method = COMP_METHOD_STORE;
+        pthread_mutex_lock (&g_best_mutex);
+        strncpy (g_last_desc, "Store", sizeof g_last_desc);
+        pthread_mutex_unlock (&g_best_mutex);
+        report_progress (100);
+        return true;
+      }
     }
 
   best_len = len;
