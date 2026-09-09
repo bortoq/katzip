@@ -2,6 +2,7 @@
 #include "policy.h"
 #include "enhanced.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include "config.h"
 
 #include <stdio.h>
@@ -18,11 +19,37 @@
 /* Progress callback for smooth single-file indication. */
 static competitor_progress_cb g_progress_cb = NULL;
 static void *g_progress_user = NULL;
-static int g_progress_base = 0;
-static int g_progress_range = 80;
-/* Highest pct already reported for the current file: trials restart their
-   own iteration counters, so raw values would jump backwards. Clamp. */
-static int g_progress_max = 0;
+/* Per-thread slice of the 0-100 range owned by the running trial.
+   Thread-local so parallel candidate workers never clobber each other. */
+static _Thread_local int g_progress_base = 0;
+static _Thread_local int g_progress_range = 80;
+/* Highest pct already displayed for the current file: trials restart their
+   own iteration counters, so raw values would jump backwards. Clamp.
+   Atomic: concurrent workers share one monotonic display. Reset at the
+   start of every competitor_compress call (display scope is one file). */
+static _Atomic int g_progress_max = 0;
+/* Nesting guard: file-level workers run their candidates sequentially
+   so thread count stays ~N instead of N*N. Thread-local: set by the
+   file-pool worker around its competitor_compress call. */
+static _Thread_local int g_nested = 0;
+
+void
+competitor_thread_enter (void)
+{
+  g_nested = 1;
+}
+
+void
+competitor_thread_exit (void)
+{
+  g_nested = 0;
+}
+
+static bool
+competitor_in_nested (void)
+{
+  return g_nested != 0;
+}
 
 void
 competitor_set_progress_cb (competitor_progress_cb cb, void *user)
@@ -40,10 +67,13 @@ report_progress (int pct)
     pct = 0;
   if (pct > 100)
     pct = 100;
-  if (pct < g_progress_max)
-    pct = g_progress_max;
-  else
-    g_progress_max = pct;
+  {
+    int cur = atomic_load (&g_progress_max);
+    if (pct < cur)
+      pct = cur;
+    else
+      atomic_store (&g_progress_max, pct);
+  }
   g_progress_cb (pct, g_progress_user);
 }
 
@@ -56,10 +86,13 @@ zopfli_report_iter (int iter, int total)
   int pct = g_progress_base + iter * g_progress_range / total;
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
-  if (pct < g_progress_max)
-    pct = g_progress_max;
-  else
-    g_progress_max = pct;
+  {
+    int cur = atomic_load (&g_progress_max);
+    if (pct < cur)
+      pct = cur;
+    else
+      atomic_store (&g_progress_max, pct);
+  }
   g_progress_cb (pct, g_progress_user);
 }
 
@@ -78,20 +111,34 @@ static pthread_mutex_t g_best_mutex = PTHREAD_MUTEX_INITIALIZER;
 const char *
 competitor_last_desc (void)
 {
-  return g_last_desc;
+  static _Thread_local char buf[256];
+  pthread_mutex_lock (&g_best_mutex);
+  strncpy (buf, g_last_desc, sizeof buf - 1);
+  buf[sizeof buf - 1] = '\0';
+  pthread_mutex_unlock (&g_best_mutex);
+  return buf;
 }
 
 /* For final archive summary. */
 const char *
 competitor_best_overall_desc (void)
 {
-  return g_best_overall_desc;
+  static _Thread_local char buf[256];
+  pthread_mutex_lock (&g_best_mutex);
+  strncpy (buf, g_best_overall_desc, sizeof buf - 1);
+  buf[sizeof buf - 1] = '\0';
+  pthread_mutex_unlock (&g_best_mutex);
+  return buf;
 }
 
 size_t
 competitor_best_overall_saved (void)
 {
-  return g_best_overall_saved;
+  size_t v;
+  pthread_mutex_lock (&g_best_mutex);
+  v = g_best_overall_saved;
+  pthread_mutex_unlock (&g_best_mutex);
+  return v;
 }
 
 /* ------------------------------------------------------------------ */
@@ -553,11 +600,9 @@ try_enhanced (const unsigned char *data, size_t len,
   if (!policy_zopfli_allowed (data, len))
     return;
 
-  /* Second engine owns the 80-100% slice: internal Zopfli iterations
-     keep reporting live through the same hook. */
-  g_progress_base = 80;
-  g_progress_range = 20;
-
+  /* Runs inside the caller-provided progress slice (sequential path
+     sets 80/20, parallel workers set their own lane). Internal Zopfli
+     iterations keep reporting live through the same hook. */
   if (enhanced_compress (data, len, &c, &cl, desc, sizeof desc))
     consider_candidate (c, cl, COMP_METHOD_DEFLATE, desc,
                         best, best_len, best_method, best_desc, 256);
@@ -588,6 +633,19 @@ cand_worker (void *arg)
   size_t local_len = job->len;
   int local_method = COMP_METHOD_STORE;
   char local_desc[256] = { 0 };
+
+  /* Own lane of the 0-100 display so concurrent engines never yank
+     the indicator backwards or teleport it forwards. */
+  if (job->kind == 2)
+    {
+      g_progress_base = 0;
+      g_progress_range = 70;
+    }
+  else if (job->kind == 3)
+    {
+      g_progress_base = 70;
+      g_progress_range = 30;
+    }
 
   if (job->kind == 0)
     try_zlib_exhaustive (job->data, job->len,
@@ -680,7 +738,7 @@ competitor_compress (const unsigned char *data, size_t len,
      (archiver only sets the callback, the mapping lives here). */
   g_progress_base = 0;
   g_progress_range = 80;
-  g_progress_max = 0;
+  atomic_store (&g_progress_max, 0);
 
   int nthreads = 1;
   {
@@ -698,7 +756,9 @@ competitor_compress (const unsigned char *data, size_t len,
         nthreads = t;
       }
   }
-  if (nthreads > 1 && len > 4096)
+  /* Nested calls (from file-pool workers) stay sequential: this caps
+     total threads at ~N instead of N*N. */
+  if (nthreads > 1 && len > 4096 && !competitor_in_nested ())
     {
       /* One thread per engine group; each merges its private best. */
       static const int kinds[] = { 0, 1, 2, 3 };
@@ -757,6 +817,11 @@ competitor_compress (const unsigned char *data, size_t len,
 #ifdef HAVE_LIBDEFLATE
       try_libdeflate_all (data, len, &best, &best_len, &best_method, best_desc);
 #endif
+      try_zopfli_max (data, len, &best, &best_len, &best_method, best_desc);
+
+      g_progress_base = 80;
+      g_progress_range = 20;
+      try_enhanced (data, len, &best, &best_len, &best_method, best_desc);
     }
 
   /* Extra strategy for very small files mimics AdvanceCOMP retry.
@@ -780,10 +845,6 @@ competitor_compress (const unsigned char *data, size_t len,
                               &best, &best_len, &best_method, best_desc, 256);
         }
     }
-
-  try_zopfli_max (data, len, &best, &best_len, &best_method, best_desc);
-
-  try_enhanced (data, len, &best, &best_len, &best_method, best_desc);
 
   /* If nothing beat the original size, store. */
   if (!best || best_len >= len)

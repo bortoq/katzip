@@ -49,6 +49,12 @@ Deflate Zopfli iter 200 splitmax 15 last 0 626 bytes
 * `src/policy.*` — skip already compressed files (jpg, mp4, zip, ...), high entropy check, size limits.
 * `katzip.ini` — all contest settings. Search order: `$KATZIP_INI`,
   `./katzip.ini` (working dir), `<binary-dir>/katzip.ini`;
+  `[core] threads` (`0`=auto/nproc, `1`=single, `N`=limit) enables two
+  thread pools: per-file (files compress in parallel, entries are written
+  sequentially, so archives are byte-identical at any thread count) and
+  per-candidate inside one file (`zlib`/`libdeflate`/`zopfli`/`enhanced`
+  groups race, smallest verified stream wins — same winner as single
+  thread). Progress stays monotonic (`0→100%`).
   every run prints the loaded file first as `config: <path>`
   (`KATZIP_INI=/dev/null` forces built-in defaults):
   `[policy]` entropy/limits/skip list, `[zlib]` on/off + levels + strategies,

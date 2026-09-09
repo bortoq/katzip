@@ -14,6 +14,12 @@
 typedef void (*competitor_progress_cb)(int pct, void *user);
 void competitor_set_progress_cb(competitor_progress_cb cb, void *user);
 
+/* Nesting guard for thread-pool workers: while active on this thread,
+   competitor_compress skips its own candidate pool (runs sequentially).
+   Prevents N*N thread explosion when called from file-pool workers. */
+void competitor_thread_enter(void);
+void competitor_thread_exit(void);
+
 /* Choose and compress a buffer with the densest DEFLATE.
    On success returns true and allocates *out (caller must free).
    *method is set to COMP_METHOD_STORE or COMP_METHOD_DEFLATE. */
