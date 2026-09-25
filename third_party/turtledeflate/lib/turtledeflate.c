@@ -84,6 +84,13 @@ bool turtledeflate_create( void **p_turtle, turtledeflate_config_t *ps_config )
 	return true;
 }
 
+void turtledeflate_set_progress_callback( void *p_turtle, turtledeflate_progress_callback_t callback, void *user )
+{
+	turtledeflate_ctx_t *ps_turtle = ( turtledeflate_ctx_t * ) p_turtle;
+	ps_turtle->pf_progress = callback;
+	ps_turtle->p_progress_user = user;
+}
+
 static int32_t i_sb_ctr = 0;
 
 #define TDF_THIS_SB_ONLY -1
@@ -104,6 +111,7 @@ int32_t turtledeflate_block( void *p_turtle, int32_t i_size, uint8_t *pui8_block
 	int32_t rgi_best_from_start_fp[ TURTLEDEFLATE_MAX_NUM_FP_START ];
 
 	ps_turtle->i_blocksplitter_state = 0;
+	ps_turtle->ui_progress_pass = 0;
 
 	
 	memcpy( pui8_block, pui8_block_, i_size * sizeof( uint8_t ) ); /* append to pre */

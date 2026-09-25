@@ -178,6 +178,9 @@ typedef struct
 typedef struct
 {
 	turtledeflate_config_t s_config;
+	turtledeflate_progress_callback_t pf_progress;
+	void *p_progress_user;
+	uint32_t ui_progress_pass;
 
 	int32_t i_blocksplitter_state;
 	int32_t i_block_pre_size;

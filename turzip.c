@@ -45,6 +45,9 @@ typedef struct {
   ENTRY *entries;
   size_t count;
   size_t capacity;
+  char **searched;
+  size_t searched_count;
+  size_t searched_capacity;
   struct stat archive_stat;
   int archive_exists;
 } ENTRY_LIST;
@@ -55,6 +58,10 @@ typedef struct {
   pthread_t thread;
   const ENTRY *entry;
   uint32_t done;
+  uint32_t pass;
+  uint32_t pass_done;
+  uint32_t pass_total;
+  int display_width;
   int active;
   int stop;
 } PROGRESS;
@@ -166,13 +173,26 @@ static int valid_utf8(const char *name)
   return 1;
 }
 
-static void show_progress(const ENTRY *entry, uint32_t done)
+static void show_progress(PROGRESS *progress)
 {
+  const ENTRY *entry = progress->entry;
+  uint32_t done = progress->done;
   uint64_t percent = entry->expected_size ? (uint64_t)done * 10000 / entry->expected_size : 10000;
+  int width;
+  int i;
   if(percent > 10000)
     percent = 10000;
-  fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
+  width = fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
     (unsigned long long)(percent / 100), (unsigned long long)(percent % 100));
+  if(progress->pass && progress->pass_total && done < entry->expected_size)
+  {
+    uint64_t pass_percent = (uint64_t)progress->pass_done * 10000 / progress->pass_total;
+    width += fprintf(stderr, " (pass %u: %llu.%02llu%%)", progress->pass,
+      (unsigned long long)(pass_percent / 100), (unsigned long long)(pass_percent % 100));
+  }
+  for(i = width; i < progress->display_width; ++i)
+    fputc(' ', stderr);
+  progress->display_width = width;
   fflush(stderr);
 }
 
@@ -192,7 +212,7 @@ static void *progress_thread(void *argument)
     ++deadline.tv_sec;
     result = pthread_cond_timedwait(&progress->condition, &progress->mutex, &deadline);
     if(result == ETIMEDOUT && progress->active)
-      show_progress(progress->entry, progress->done);
+      show_progress(progress);
   }
   pthread_mutex_unlock(&progress->mutex);
   return NULL;
@@ -222,8 +242,12 @@ static void progress_start(PROGRESS *progress, const ENTRY *entry)
   pthread_mutex_lock(&progress->mutex);
   progress->entry = entry;
   progress->done = 0;
+  progress->pass = 0;
+  progress->pass_done = 0;
+  progress->pass_total = 0;
+  progress->display_width = 0;
   progress->active = 1;
-  show_progress(entry, 0);
+  show_progress(progress);
   pthread_cond_signal(&progress->condition);
   pthread_mutex_unlock(&progress->mutex);
 }
@@ -232,13 +256,27 @@ static void progress_update(PROGRESS *progress, uint32_t done)
 {
   pthread_mutex_lock(&progress->mutex);
   progress->done = done;
+  progress->pass = 0;
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_callback(void *user, uint32_t pass, uint32_t completed, uint32_t total)
+{
+  PROGRESS *progress = (PROGRESS*)user;
+  pthread_mutex_lock(&progress->mutex);
+  progress->pass = pass;
+  progress->pass_done = completed;
+  progress->pass_total = total;
   pthread_mutex_unlock(&progress->mutex);
 }
 
 static void progress_finish(PROGRESS *progress, int success)
 {
   pthread_mutex_lock(&progress->mutex);
-  show_progress(progress->entry, success ? progress->entry->expected_size : progress->done);
+  if(success)
+    progress->done = progress->entry->expected_size;
+  progress->pass = 0;
+  show_progress(progress);
   fputc('\n', stderr);
   progress->active = 0;
   pthread_cond_signal(&progress->condition);
@@ -509,6 +547,8 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
     goto done;
   progress_start(progress, entry);
   progress_started = 1;
+  if(compressor)
+    turtledeflate_set_progress_callback(compressor, progress_callback, progress);
   while(size)
   {
     next = fgetc(in);
@@ -672,11 +712,6 @@ static char *join_path(const char *directory, const char *name)
   return path;
 }
 
-static int has_wildcard(const char *text)
-{
-  return strpbrk(text, "*?[") != NULL;
-}
-
 static int matches_pattern(const char *pattern, const char *relative, const char *basename)
 {
   const char *suffix;
@@ -695,7 +730,7 @@ static int matches_pattern(const char *pattern, const char *relative, const char
   return 0;
 }
 
-static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char *pattern)
+static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char *pattern, size_t *matched)
 {
   DIR *stream = opendir(directory);
   struct dirent *item;
@@ -732,12 +767,16 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
       status = -1;
     }
     else if(S_ISDIR(file_stat.st_mode))
-      status = walk_directory(list, path, root, pattern);
+      status = walk_directory(list, path, root, pattern, matched);
     else if(S_ISREG(file_stat.st_mode))
     {
       relative = strcmp(root, ".") == 0 ? path : path + strlen(root) + 1;
       if(matches_pattern(pattern, relative, item->d_name))
+      {
+        if(matched)
+          ++*matched;
         status = add_entry(list, path, 1);
+      }
     }
     free(path);
     if(status)
@@ -748,16 +787,58 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
   return status;
 }
 
+static int search_files(ENTRY_LIST *list, const char *root, const char *pattern)
+{
+  char *key = join_path(root, pattern);
+  char **grown;
+  size_t capacity;
+  size_t matched = 0;
+  size_t i;
+  int status;
+  if(!key)
+    return -1;
+  for(i = 0; i < list->searched_count; ++i)
+  {
+    if(strcmp(key, list->searched[i]) == 0)
+    {
+      free(key);
+      return 0;
+    }
+  }
+  if(list->searched_count == list->searched_capacity)
+  {
+    capacity = list->searched_capacity ? list->searched_capacity * 2 : 8;
+    grown = realloc(list->searched, capacity * sizeof(*grown));
+    if(!grown)
+    {
+      free(key);
+      return -1;
+    }
+    list->searched = grown;
+    list->searched_capacity = capacity;
+  }
+  list->searched[list->searched_count++] = key;
+  status = walk_directory(list, root, root, pattern, &matched);
+  if(!status && !matched)
+  {
+    fprintf(stderr, "turzip: no files match %s\n", key);
+    return -1;
+  }
+  return status;
+}
+
 static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
 {
   const char *magic;
   const char *slash;
   const char *name = argument;
+  const char *base;
+  const char *dot;
   struct stat file_stat;
   char *root;
+  char *extension_pattern;
   const char *pattern;
   size_t prefix;
-  size_t before = list->count;
   int status;
   while(name[0] == '.' && name[1] == '/')
     name += 2;
@@ -785,7 +866,7 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
       root[prefix] = 0;
     }
     pattern = slash ? slash + 1 : argument;
-    status = walk_directory(list, root, root, pattern);
+    status = search_files(list, root, pattern);
     free(root);
   }
   else if(recursive && !stat(argument, &file_stat) && S_ISDIR(file_stat.st_mode))
@@ -796,16 +877,41 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
     prefix = strlen(root);
     while(prefix > 1 && root[prefix - 1] == '/')
       root[--prefix] = 0;
-    status = walk_directory(list, root, root, NULL);
+    status = walk_directory(list, root, root, NULL, NULL);
     free(root);
+  }
+  else if(recursive && !stat(argument, &file_stat) && S_ISREG(file_stat.st_mode))
+  {
+    status = add_entry(list, argument, 1);
+    if(status)
+      return status;
+    slash = strrchr(argument, '/');
+    base = slash ? slash + 1 : argument;
+    dot = strrchr(base, '.');
+    if(!dot || dot == base || !dot[1])
+      return 0;
+    prefix = slash ? (size_t)(slash - argument) : 0;
+    root = prefix ? malloc(prefix + 1) : copy_text(".");
+    extension_pattern = malloc(strlen(dot) + 2);
+    if(!root || !extension_pattern)
+    {
+      free(root);
+      free(extension_pattern);
+      return -1;
+    }
+    if(prefix)
+    {
+      memcpy(root, argument, prefix);
+      root[prefix] = 0;
+    }
+    extension_pattern[0] = '*';
+    strcpy(extension_pattern + 1, dot);
+    status = search_files(list, root, extension_pattern);
+    free(root);
+    free(extension_pattern);
   }
   else
     status = add_entry(list, argument, 0);
-  if(!status && recursive && has_wildcard(argument) && list->count == before)
-  {
-    fprintf(stderr, "turzip: no files match %s\n", argument);
-    return -1;
-  }
   return status;
 }
 
@@ -818,6 +924,9 @@ static void free_entries(ENTRY_LIST *list)
     free((void*)list->entries[i].name);
   }
   free(list->entries);
+  for(i = 0; i < list->searched_count; ++i)
+    free(list->searched[i]);
+  free(list->searched);
 }
 
 int main(int argc, char **argv)

@@ -14,7 +14,7 @@ Keep `turzip.ini` next to the executable.
 ./turzip archive.zip file1.txt folder/file2.txt
 ./turzip -9 archive.zip file1.txt folder/file2.txt
 ./turzip -r backup folder
-./turzip -r -9 texts '*.txt'
+./turzip -r -9 texts *.txt
 ```
 
 An optional `-1` to `-9` flag sets the compression level before the output path.
@@ -37,15 +37,18 @@ keeps its relative path inside the archive. UTF-8 file names are marked as
 UTF-8 in the ZIP headers.
 
 Use `-r` to add all regular files in a directory and its subdirectories. With
-`-r`, a file mask such as `'*.txt'` searches the current directory and all its
-subdirectories. A mask such as `'folder/*.txt'` starts in `folder`. Quote a mask
-so your shell passes it to turzip instead of expanding it first. Symbolic links
-found while walking directories are skipped.
+`-r`, a file mask such as `*.txt` searches the current directory and all its
+subdirectories. A mask such as `folder/*.txt` starts in `folder`. If the shell
+expands `*.txt` first, turzip searches below the directory of each expanded
+file for that file's extension. For more specific masks, pass the mask
+literally so turzip can see its full pattern. Symbolic links found while
+walking directories are skipped.
 
 While compressing, turzip shows each file name and its completed percentage to
 two decimal places on standard error. It refreshes the display once per second.
-The percentage changes when a compression block finishes, so level 9 can show
-the same value for several seconds.
+The file percentage advances after each compression block. During a block,
+turzip also shows the current Turtledeflate pass and the percentage scanned in
+that pass. Pass percentages restart at zero as the compressor tries new passes.
 
 turzip replaces an existing output file. It returns a nonzero exit status on
 error. Without `-r`, it does not accept directories. Absolute input paths and
