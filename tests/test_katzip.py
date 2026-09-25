@@ -5,6 +5,7 @@ import signal
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -96,6 +97,31 @@ class KatzipTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(old.read_bytes(), b"previous archive")
         self.assertEqual(list(self.root.glob("archive.zip.tmp.*")), [])
+
+    def test_interrupt_removes_temporary_archive(self):
+        archive = self.root / "archive.zip"
+        archive.write_bytes(b"previous archive")
+        (self.root / "large.bin").write_bytes(os.urandom(262144))
+        for interrupt in (signal.SIGINT, signal.SIGTERM):
+            process = subprocess.Popen(
+                [str(PROGRAM), "-9", "archive", "large.bin"],
+                cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not list(self.root.glob("archive.zip.tmp.*")) and time.monotonic() < deadline:
+                    self.assertIsNone(process.poll(), "katzip exited before creating its temporary archive")
+                    time.sleep(0.01)
+                self.assertTrue(list(self.root.glob("archive.zip.tmp.*")))
+                process.send_signal(interrupt)
+                process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 128 + interrupt)
+                self.assertEqual(archive.read_bytes(), b"previous archive")
+                self.assertEqual(list(self.root.glob("archive.zip.tmp.*")), [])
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
 
     def test_replacing_archive_keeps_its_permissions(self):
         archive = self.root / "archive.zip"

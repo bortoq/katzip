@@ -90,9 +90,10 @@ follows Turtledeflate while ECT runs in parallel; the final ratio appears after
 both candidates finish.
 
 katzip writes to a temporary file and replaces an existing output only after
-the new archive is complete. It returns a nonzero exit status on
-error. Without `-r`, it does not accept directories. Absolute input paths and
-`..` path components are not accepted. Repeated files found during a recursive
+the new archive is complete. Ctrl+C (SIGINT) or SIGTERM removes the temporary
+archive immediately; any existing output remains intact. It returns a nonzero
+exit status on error. Without `-r`, it does not accept directories. Absolute
+input paths and `..` path components are not accepted. Repeated files found during a recursive
 search are added only once.
 
 This program writes standard ZIP files without ZIP64. An archive and each

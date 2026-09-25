@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,15 @@ typedef struct {
 /* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
 #define MAX_BLOCK_SIZE 1000000
 #define FAST_FILE_LIMIT (64U * 1024U * 1024U)
+
+static const char *volatile signal_temp_path;
+
+static void remove_temp_on_signal(int signal_number)
+{
+  if(signal_temp_path)
+    unlink(signal_temp_path);
+  _exit(128 + signal_number);
+}
 
 static uint32_t update_crc(uint32_t crc, const unsigned char *data, size_t size)
 {
@@ -1096,6 +1106,12 @@ int main(int argc, char **argv)
   int recursive = 0;
   int source_count = 0;
   int progress_ready = 0;
+  int handlers_active = 0;
+  struct sigaction action;
+  struct sigaction previous_int;
+  struct sigaction previous_term;
+  sigset_t startup_mask;
+  sigset_t startup_previous_mask;
   int error_number;
   struct stat output_stat;
   mode_t output_mode;
@@ -1184,12 +1200,6 @@ int main(int argc, char **argv)
     fprintf(stderr, "katzip: no files to archive\n");
     goto done;
   }
-  if(progress_init(&progress))
-  {
-    fprintf(stderr, "katzip: cannot start progress display\n");
-    goto done;
-  }
-  progress_ready = 1;
   temporary_path = malloc(strlen(archive_path) + sizeof(".tmp.XXXXXX"));
   if(!temporary_path)
   {
@@ -1197,17 +1207,61 @@ int main(int argc, char **argv)
     goto done;
   }
   sprintf(temporary_path, "%s.tmp.XXXXXX", archive_path);
+  sigemptyset(&startup_mask);
+  sigaddset(&startup_mask, SIGINT);
+  sigaddset(&startup_mask, SIGTERM);
+  if(sigprocmask(SIG_BLOCK, &startup_mask, &startup_previous_mask))
+  {
+    fprintf(stderr, "katzip: cannot block interrupts: %s\n", strerror(errno));
+    goto done;
+  }
   i = mkstemp(temporary_path);
   if(i < 0)
   {
-    fprintf(stderr, "katzip: cannot create temporary archive: %s\n", strerror(errno));
+    error_number = errno;
+    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
+    fprintf(stderr, "katzip: cannot create temporary archive: %s\n", strerror(error_number));
     goto done;
   }
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = remove_temp_on_signal;
+  sigemptyset(&action.sa_mask);
+  signal_temp_path = temporary_path;
+  if(sigaction(SIGINT, &action, &previous_int))
+  {
+    error_number = errno;
+    close(i);
+    unlink(temporary_path);
+    signal_temp_path = NULL;
+    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
+    fprintf(stderr, "katzip: cannot handle interrupts: %s\n", strerror(error_number));
+    goto done;
+  }
+  if(sigaction(SIGTERM, &action, &previous_term))
+  {
+    error_number = errno;
+    sigaction(SIGINT, &previous_int, NULL);
+    close(i);
+    unlink(temporary_path);
+    signal_temp_path = NULL;
+    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
+    fprintf(stderr, "katzip: cannot handle interrupts: %s\n", strerror(error_number));
+    goto done;
+  }
+  handlers_active = 1;
+  sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
   if(close(i))
   {
     error_number = errno;
     goto remove_temp;
   }
+  if(progress_init(&progress))
+  {
+    fprintf(stderr, "katzip: cannot start progress display\n");
+    error_number = EAGAIN;
+    goto remove_temp;
+  }
+  progress_ready = 1;
   writer = mz_zip_writer_create();
   if(!writer || mz_zip_writer_open_file(writer, temporary_path, 0, 0) != MZ_OK ||
     mz_zip_writer_get_zip_handle(writer, &zip) != MZ_OK)
@@ -1287,6 +1341,15 @@ remove_temp:
 done:
   if(progress_ready)
     progress_destroy(&progress);
+  if(handlers_active)
+  {
+    sigset_t previous_mask;
+    sigprocmask(SIG_BLOCK, &startup_mask, &previous_mask);
+    sigaction(SIGINT, &previous_int, NULL);
+    sigaction(SIGTERM, &previous_term, NULL);
+    signal_temp_path = NULL;
+    sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+  }
   free_entries(&list);
   free(masks);
   free(temporary_path);
