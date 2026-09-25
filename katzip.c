@@ -50,6 +50,17 @@ typedef struct {
 } CONFIG_FIELD;
 
 typedef struct {
+  turtledeflate_config_t turtle;
+  ZopfliOptions ect;
+  int fast_level;
+  int zlib_level;
+  uint64_t zlib_after;
+  int have_fast;
+  int have_ect;
+  int have_turtle;
+} COMPRESSION_CONFIG;
+
+typedef struct {
   ENTRY *entries;
   size_t count;
   size_t capacity;
@@ -81,19 +92,81 @@ typedef struct {
   size_t input_size;
   size_t output_size;
   uint32_t crc;
-  int mode;
+  ZopfliOptions options;
   int started;
 } ECT_JOB;
 
 #define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
 /* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
 #define MAX_BLOCK_SIZE 1000000
-#define FAST_FILE_LIMIT (64U * 1024U * 1024U)
+#define DEFAULT_ZLIB_AFTER (64U * 1024U * 1024U)
 
 /* Presets are the only source for both compression and generated INI files. */
 static const int fast_defaults[] = {1, 2, 3, 5, 6, 8};
 
-static const int ect_defaults[] = {7, 9};
+/* ECT modes 7 and 9, expanded from ZopfliInitOptions(mode, 0, 0). */
+static const ZopfliOptions ect_defaults[] = {
+  {
+    .numiterations = 13,
+    .filter_style = 1,
+    .skipdynamic = 80,
+    .trystatic = 1800,
+    .noblocksplit = 1000,
+    .noblocksplitlz = 200,
+    .num = 9,
+    .searchext = 1,
+    .reuse_costmodel = 1,
+    .useCache = 1,
+    .multithreading = 0,
+    .isPNG = 0,
+    .replaceCodes = 1001,
+    .twice = 0,
+    .ultra = 1,
+    .greed = 258,
+    .entropysplit = 0,
+    .advanced = 1
+  },
+  {
+    .numiterations = 60,
+    .filter_style = 3,
+    .skipdynamic = 80,
+    .trystatic = 3000,
+    .noblocksplit = 800,
+    .noblocksplitlz = 100,
+    .num = 9,
+    .searchext = 2,
+    .reuse_costmodel = 1,
+    .useCache = 1,
+    .multithreading = 0,
+    .isPNG = 0,
+    .replaceCodes = 1001,
+    .twice = 0,
+    .ultra = 1,
+    .greed = 258,
+    .entropysplit = 0,
+    .advanced = 1
+  },
+  {
+    .numiterations = 60,
+    .filter_style = 3,
+    .skipdynamic = 80,
+    .trystatic = 3000,
+    .noblocksplit = 800,
+    .noblocksplitlz = 100,
+    .num = 9,
+    .searchext = 2,
+    .reuse_costmodel = 1,
+    .useCache = 1,
+    .multithreading = 0,
+    .isPNG = 0,
+    .replaceCodes = 1001,
+    .twice = 0,
+    .ultra = 1,
+    .greed = 258,
+    .entropysplit = 0,
+    .advanced = 1
+  }
+};
 
 static const turtledeflate_config_t turtle_defaults[] = {
   {
@@ -134,6 +207,35 @@ static const CONFIG_FIELD config_fields[] = {
   {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
 };
 
+typedef struct {
+  const char *name;
+  size_t offset;
+  int minimum;
+  int maximum;
+} ECT_FIELD;
+
+/* These are the public ECT ZopfliOptions fields, in struct order. */
+static const ECT_FIELD ect_fields[] = {
+  {"numiterations", offsetof(ZopfliOptions, numiterations), 1, 1000},
+  {"filter_style", offsetof(ZopfliOptions, filter_style), 0, 3},
+  {"skipdynamic", offsetof(ZopfliOptions, skipdynamic), 0, 1000000},
+  {"trystatic", offsetof(ZopfliOptions, trystatic), 0, 1000000},
+  {"noblocksplit", offsetof(ZopfliOptions, noblocksplit), 0, 1000000},
+  {"noblocksplitlz", offsetof(ZopfliOptions, noblocksplitlz), 0, 1000000},
+  {"num", offsetof(ZopfliOptions, num), 1, 64},
+  {"searchext", offsetof(ZopfliOptions, searchext), 0, 2},
+  {"reuse_costmodel", offsetof(ZopfliOptions, reuse_costmodel), 0, 1},
+  {"useCache", offsetof(ZopfliOptions, useCache), 0, 1},
+  {"multithreading", offsetof(ZopfliOptions, multithreading), 0, 0},
+  {"isPNG", offsetof(ZopfliOptions, isPNG), 0, 0},
+  {"replaceCodes", offsetof(ZopfliOptions, replaceCodes), 0, 100000},
+  {"twice", offsetof(ZopfliOptions, twice), 0, 1},
+  {"ultra", offsetof(ZopfliOptions, ultra), 0, 3},
+  {"greed", offsetof(ZopfliOptions, greed), 0, 258},
+  {"entropysplit", offsetof(ZopfliOptions, entropysplit), 0, 1},
+  {"advanced", offsetof(ZopfliOptions, advanced), 0, 1}
+};
+
 static const char *volatile signal_temp_path;
 
 static void remove_temp_on_signal(int signal_number)
@@ -151,10 +253,8 @@ static uint32_t update_crc(uint32_t crc, const unsigned char *data, size_t size)
 static void *ect_worker(void *argument)
 {
   ECT_JOB *job = (ECT_JOB*)argument;
-  ZopfliOptions options;
   unsigned char bit_position = 0;
-  ZopfliInitOptions(&options, (unsigned)job->mode, 0, 0);
-  ZopfliDeflate(&options, 1, job->input, job->input_size,
+  ZopfliDeflate(&job->options, 1, job->input, job->input_size,
     &bit_position, &job->output, &job->output_size);
   free(job->input);
   job->input = NULL;
@@ -163,11 +263,11 @@ static void *ect_worker(void *argument)
 
 /* Read a stable snapshot before ECT starts compressing in the worker. */
 static int start_ect_job(ECT_JOB *job, FILE *in, uint32_t size,
-  int mode)
+  const ZopfliOptions *options)
 {
   int next;
   memset(job, 0, sizeof(*job));
-  job->mode = mode;
+  job->options = *options;
   if(!size)
     return 0;
 #if SIZE_MAX <= UINT32_MAX
@@ -506,18 +606,30 @@ static int open_named_config(const char *name, FILE **file, char **path)
   return saved_error == ENOENT || saved_error == ENOTDIR ? 1 : -1;
 }
 
-/* Read a typed preset when no editable INI is available. */
-static void use_default_config(int level, turtledeflate_config_t *config,
-  int *fast_level)
+/* Each built-in mode defines both its engine and its size policy. */
+static void use_default_config(int level, COMPRESSION_CONFIG *config)
 {
   memset(config, 0, sizeof(*config));
-  *fast_level = 0;
+  config->zlib_level = level;
+  config->zlib_after = UINT64_MAX;
   if(level <= (int)ARRAY_N(fast_defaults))
-    *fast_level = fast_defaults[level - 1];
-  else if(level < 9)
-    *fast_level = ect_defaults[level - 7];
+  {
+    config->have_fast = 1;
+    config->fast_level = fast_defaults[level - 1];
+    config->zlib_level = fast_defaults[level - 1] > 9 ?
+      9 : fast_defaults[level - 1];
+    config->zlib_after = DEFAULT_ZLIB_AFTER;
+  }
   else
-    *config = turtle_defaults[0];
+  {
+    config->have_ect = 1;
+    config->ect = ect_defaults[level - 7];
+  }
+  if(level == 9)
+  {
+    config->have_turtle = 1;
+    config->turtle = turtle_defaults[0];
+  }
 }
 
 static int default_field_value(const turtledeflate_config_t *config,
@@ -529,41 +641,71 @@ static int default_field_value(const turtledeflate_config_t *config,
   return *(const int32_t*)address;
 }
 
-/* The same tables drive the editable INI and the no-file fallback. */
+static int default_ect_value(const ZopfliOptions *options,
+  const ECT_FIELD *field)
+{
+  const unsigned char *address = (const unsigned char*)options + field->offset;
+  if(field == &ect_fields[0])
+    return *(const int*)address;
+  return (int)*(const unsigned*)address;
+}
+
+static int write_ect_settings(FILE *file, const ZopfliOptions *options)
+{
+  size_t field;
+  for(field = 0; field < ARRAY_N(ect_fields); ++field)
+    if(fprintf(file, "zopfli_%s = %d\n", ect_fields[field].name,
+      default_ect_value(options, &ect_fields[field])) < 0)
+      return -1;
+  return 0;
+}
+
+static int write_turtle_settings(FILE *file,
+  const turtledeflate_config_t *config)
+{
+  size_t field;
+  for(field = 0; field < ARRAY_N(config_fields); ++field)
+    if(fprintf(file, "turtledeflate_%s = %d\n",
+      config_fields[field].name,
+      default_field_value(config, &config_fields[field])) < 0)
+      return -1;
+  return 0;
+}
+
+/* Generate the editable file from the same tables as the fallback. */
 static int write_default_ini(FILE *file)
 {
-  size_t level;
-  size_t field;
-  if(fputs("# Compression settings for katzip. Levels 1-6 use libdeflate "
-    "on files up to\n# 64 MiB. Larger files use streaming zlib at the "
-    "selected level (capped at 9).\n# Levels 7-8 use ECT Zopfli; "
-    "level 9 compares ECT and Turtledeflate.\n\n", file) == EOF)
+  int level;
+  if(fputs("# One section per katzip level. Multiple compressor setting groups "
+    "compete.\n# zlib_after replaces them at or above the given file size; "
+    "off disables it.\n# Sizes accept bytes, KiB, MiB and GiB.\n\n",
+    file) == EOF)
     return -1;
-  for(level = 0; level < ARRAY_N(fast_defaults); ++level)
+  for(level = 1; level <= 9; ++level)
   {
-    if(fprintf(file, "[libdeflate-%zu]\nlevel = %d\n\n",
-      level + 1, fast_defaults[level]) < 0)
+    COMPRESSION_CONFIG config;
+    use_default_config(level, &config);
+    if(fprintf(file, "[%d]\n", level) < 0)
       return -1;
-  }
-  for(level = 0; level < ARRAY_N(ect_defaults); ++level)
-  {
-    if(fprintf(file, "[ect-%zu]\nlevel = %d\n\n",
-      level + 7, ect_defaults[level]) < 0)
+    if(config.have_fast && fprintf(file,
+      "libdeflate_level = %d\n", config.fast_level) < 0)
       return -1;
-  }
-  for(level = 0; level < ARRAY_N(turtle_defaults); ++level)
-  {
-    if(fprintf(file, "[turtledeflate-%zu]\n", level + 9) < 0)
+    if(config.have_ect && write_ect_settings(file, &config.ect))
       return -1;
-    for(field = 0; field < ARRAY_N(config_fields); ++field)
+    if(config.have_turtle &&
+      write_turtle_settings(file, &config.turtle))
+      return -1;
+    if(config.zlib_after == UINT64_MAX)
     {
-      if(fprintf(file, "%s = %d\n", config_fields[field].name,
-        default_field_value(&turtle_defaults[level],
-          &config_fields[field])) < 0)
+      if(fputs("zlib_after = off\n", file) == EOF)
         return -1;
     }
-    if(level + 1 < ARRAY_N(turtle_defaults) &&
-      fputc('\n', file) == EOF)
+    else if(fprintf(file, "zlib_after = %llu\n",
+      (unsigned long long)config.zlib_after) < 0)
+      return -1;
+    if(fprintf(file, "zlib_level = %d\n", config.zlib_level) < 0)
+      return -1;
+    if(level < 9 && fputc('\n', file) == EOF)
       return -1;
   }
   return ferror(file) ? -1 : 0;
@@ -668,9 +810,10 @@ static int open_config(const char *program, FILE **file, char **path)
   return 1;
 }
 
-static int valid_config(const turtledeflate_config_t *config, int level)
+static int valid_config(const turtledeflate_config_t *config)
 {
-  return config->i_compression_level == level &&
+  return config->i_compression_level >= 1 &&
+    config->i_compression_level <= 9 &&
     config->i_maximum_block_size >= TURTLEDEFLATE_MIN_BLOCK_SIZE &&
     config->i_maximum_block_size <= MAX_BLOCK_SIZE &&
     config->i_maximum_subblocks >= TURTLEDEFLATE_MIN_SUBBLOCKS &&
@@ -693,85 +836,174 @@ static int valid_config(const turtledeflate_config_t *config, int level)
     config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
 }
 
-/* Keep parsing separate from file lookup so both INI sources use one validator. */
-static int parse_setting(char *line, int level, turtledeflate_config_t *config,
-  int *fast_level, uint32_t *seen)
+typedef struct {
+  uint32_t fast;
+  uint32_t ect;
+  uint32_t turtle;
+  int zlib_after;
+  int zlib_level;
+} CONFIG_SEEN;
+
+static int parse_size(const char *text, uint64_t *size)
 {
-  char *value = strchr(line, '=');
   char *end;
-  long number;
-  size_t i;
-  if(!value)
-    return -1;
-  *value++ = 0;
-  line = trim(line);
-  value = trim(value);
-  errno = 0;
-  number = strtol(value, &end, 10);
-  if(!*value || *end || errno == ERANGE ||
-    number < INT32_MIN || number > INT32_MAX)
-    return -1;
-  if(level < 9)
+  unsigned long long number;
+  uint64_t multiplier = 1;
+  if(strcmp(text, "off") == 0)
   {
-    int minimum = level < 7 ? 1 : 2;
-    int maximum = level < 7 ? 12 : 9;
-    if(strcmp(line, "level") || *seen ||
-      number < minimum || number > maximum)
-      return -1;
-    *fast_level = (int)number;
-    *seen = 1;
+    *size = UINT64_MAX;
     return 0;
   }
-  for(i = 0; i < ARRAY_N(config_fields); ++i)
-  {
-    if(strcmp(line, config_fields[i].name) == 0)
+  if(!isdigit((unsigned char)*text))
+    return -1;
+  errno = 0;
+  number = strtoull(text, &end, 10);
+  if(errno == ERANGE)
+    return -1;
+  if(strcmp(end, "KiB") == 0)
+    multiplier = 1024;
+  else if(strcmp(end, "MiB") == 0)
+    multiplier = UINT64_C(1024) * 1024;
+  else if(strcmp(end, "GiB") == 0)
+    multiplier = UINT64_C(1024) * 1024 * 1024;
+  else if(*end && strcmp(end, "B") != 0)
+    return -1;
+  if(number > UINT64_MAX / multiplier)
+    return -1;
+  *size = (uint64_t)number * multiplier;
+  return 0;
+}
+
+static int parse_number(const char *text, int *number)
+{
+  char *end;
+  long value;
+  errno = 0;
+  value = strtol(text, &end, 10);
+  if(!*text || *end || errno == ERANGE ||
+    value < INT32_MIN || value > INT32_MAX)
+    return -1;
+  *number = (int)value;
+  return 0;
+}
+
+static int parse_ect_setting(const char *name, int number,
+  COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
+{
+  size_t i;
+  for(i = 0; i < ARRAY_N(ect_fields); ++i)
+    if(strcmp(name, ect_fields[i].name) == 0)
       break;
-  }
-  if(i == ARRAY_N(config_fields) || (*seen & (UINT32_C(1) << i)))
+  if(i == ARRAY_N(ect_fields) ||
+    (seen->ect & (UINT32_C(1) << i)) ||
+    number < ect_fields[i].minimum || number > ect_fields[i].maximum)
+    return -1;
+  if(i == 0)
+    config->ect.numiterations = number;
+  else
+    *(unsigned*)((unsigned char*)&config->ect + ect_fields[i].offset) =
+      (unsigned)number;
+  seen->ect |= UINT32_C(1) << i;
+  return 0;
+}
+
+static int parse_turtle_setting(const char *name, int number,
+  COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
+{
+  size_t i;
+  for(i = 0; i < ARRAY_N(config_fields); ++i)
+    if(strcmp(name, config_fields[i].name) == 0)
+      break;
+  if(i == ARRAY_N(config_fields) ||
+    (seen->turtle & (UINT32_C(1) << i)))
     return -1;
   if(config_fields[i].boolean)
   {
     if(number != 0 && number != 1)
       return -1;
-    *(bool*)((unsigned char*)config + config_fields[i].offset) = number != 0;
+    *(bool*)((unsigned char*)&config->turtle +
+      config_fields[i].offset) = number != 0;
   }
   else
-    *(int32_t*)((unsigned char*)config + config_fields[i].offset) =
-      (int32_t)number;
-  *seen |= UINT32_C(1) << i;
+    *(int32_t*)((unsigned char*)&config->turtle +
+      config_fields[i].offset) = (int32_t)number;
+  seen->turtle |= UINT32_C(1) << i;
   return 0;
 }
 
-static int config_is_complete(int level, int found, uint32_t seen,
-  const turtledeflate_config_t *config)
+static int parse_setting(char *line, COMPRESSION_CONFIG *config,
+  CONFIG_SEEN *seen)
 {
-  if(!found)
+  char *value = strchr(line, '=');
+  int number;
+  if(!value)
+    return -1;
+  *value++ = 0;
+  line = trim(line);
+  value = trim(value);
+  if(strcmp(line, "zlib_after") == 0)
+  {
+    if(seen->zlib_after || parse_size(value, &config->zlib_after))
+      return -1;
+    seen->zlib_after = 1;
     return 0;
-  if(level < 9)
-    return seen == 1;
-  return seen == (UINT32_C(1) << ARRAY_N(config_fields)) - 1 &&
-    valid_config(config, level);
+  }
+  if(parse_number(value, &number))
+    return -1;
+  if(strcmp(line, "zlib_level") == 0)
+  {
+    if(seen->zlib_level || number < 1 || number > 9)
+      return -1;
+    config->zlib_level = number;
+    seen->zlib_level = 1;
+    return 0;
+  }
+  if(strcmp(line, "libdeflate_level") == 0)
+  {
+    if(seen->fast || number < 1 || number > 12)
+      return -1;
+    config->fast_level = number;
+    seen->fast = 1;
+    return 0;
+  }
+  if(strncmp(line, "zopfli_", 7) == 0)
+    return parse_ect_setting(line + 7, number, config, seen);
+  if(strncmp(line, "turtledeflate_", 14) == 0)
+    return parse_turtle_setting(line + 14, number, config, seen);
+  return -1;
+}
+
+static int config_is_complete(int found, const CONFIG_SEEN *seen,
+  COMPRESSION_CONFIG *config)
+{
+  uint32_t all_ect = (UINT32_C(1) << ARRAY_N(ect_fields)) - 1;
+  uint32_t all_turtle = (UINT32_C(1) << ARRAY_N(config_fields)) - 1;
+  if(!found || !seen->zlib_after || !seen->zlib_level ||
+    (!seen->fast && !seen->ect && !seen->turtle &&
+      config->zlib_after != 0) ||
+    (seen->ect && seen->ect != all_ect) ||
+    (seen->turtle && seen->turtle != all_turtle) ||
+    (seen->turtle && !valid_config(&config->turtle)))
+    return 0;
+  config->have_fast = seen->fast != 0;
+  config->have_ect = seen->ect != 0;
+  config->have_turtle = seen->turtle != 0;
+  return 1;
 }
 
 static int read_config(FILE *file, const char *path, int level,
-  turtledeflate_config_t *config, int *fast_level)
+  COMPRESSION_CONFIG *config)
 {
-  char section[32];
+  char section[16];
   char line[256];
   char *text;
-  uint32_t seen = 0;
+  CONFIG_SEEN seen = {0};
   int active = 0;
   int found = 0;
   int line_number = 0;
   int invalid = 0;
-  if(level < 7)
-    snprintf(section, sizeof(section), "[libdeflate-%d]", level);
-  else if(level < 9)
-    snprintf(section, sizeof(section), "[ect-%d]", level);
-  else
-    snprintf(section, sizeof(section), "[turtledeflate-%d]", level);
+  snprintf(section, sizeof(section), "[%d]", level);
   memset(config, 0, sizeof(*config));
-  *fast_level = 0;
   while(fgets(line, sizeof(line), file))
   {
     ++line_number;
@@ -786,18 +1018,16 @@ static int read_config(FILE *file, const char *path, int level,
     if(*text == '[')
     {
       active = strcmp(text, section) == 0;
-      if(active)
+      if(active && found)
       {
-        if(found)
-        {
-          invalid = 1;
-          break;
-        }
-        found = 1;
+        invalid = 1;
+        break;
       }
+      if(active)
+        found = 1;
       continue;
     }
-    if(active && parse_setting(text, level, config, fast_level, &seen))
+    if(active && parse_setting(text, config, &seen))
     {
       invalid = 1;
       break;
@@ -813,7 +1043,7 @@ static int read_config(FILE *file, const char *path, int level,
     fprintf(stderr, "katzip: cannot read %s\n", path);
     return -1;
   }
-  if(!config_is_complete(level, found, seen, config))
+  if(!config_is_complete(found, &seen, config))
   {
     fprintf(stderr, "katzip: missing or invalid settings in %s %s\n",
       path, section);
@@ -823,7 +1053,7 @@ static int read_config(FILE *file, const char *path, int level,
 }
 
 static int load_config(const char *program, int level,
-  turtledeflate_config_t *config, int *fast_level)
+  COMPRESSION_CONFIG *config)
 {
   char *path = NULL;
   FILE *file;
@@ -834,12 +1064,12 @@ static int load_config(const char *program, int level,
     free(path);
     if(result > 0)
     {
-      use_default_config(level, config, fast_level);
+      use_default_config(level, config);
       return 0;
     }
     return -1;
   }
-  result = read_config(file, path, level, config, fast_level);
+  result = read_config(file, path, level, config);
   fclose(file);
   free(path);
   return result;
@@ -1041,12 +1271,22 @@ static int write_fast_entry(void *zip, ENTRY *entry, FILE *in,
   uint32_t crc = UINT32_MAX;
   int result;
   progress_start(progress, entry, NULL);
-  if(entry->expected_size <= FAST_FILE_LIMIT)
-    result = compress_small_entry(zip, entry, in, level,
-      zip_level, progress, &crc);
-  else
-    result = compress_stream_entry(zip, entry, in, level,
-      zip_level, progress, &crc);
+  result = compress_small_entry(zip, entry, in, level,
+    zip_level, progress, &crc);
+  if(!result)
+    result = close_zip_entry(zip, entry, crc);
+  progress_finish(progress, result == 0);
+  return result;
+}
+
+static int write_zlib_entry(void *zip, ENTRY *entry, FILE *in,
+  int level, int zip_level, PROGRESS *progress)
+{
+  uint32_t crc = UINT32_MAX;
+  int result;
+  progress_start(progress, entry, NULL);
+  result = compress_stream_entry(zip, entry, in, level,
+    zip_level, progress, &crc);
   if(!result)
     result = close_zip_entry(zip, entry, crc);
   progress_finish(progress, result == 0);
@@ -1081,7 +1321,7 @@ static int write_stored_input(void *zip, FILE *in,
 /* ECT compresses the entire file at once, so levels 7-8 need no
  * Turtledeflate pass or temporary DEFLATE stream. */
 static int write_ect_entry(void *zip, ENTRY *entry, FILE *in,
-  int mode, int zip_level, PROGRESS *progress)
+  const ZopfliOptions *options, int zip_level, PROGRESS *progress)
 {
   static const unsigned char empty_deflate[] = {0x03, 0x00};
   ECT_JOB job;
@@ -1089,7 +1329,7 @@ static int write_ect_entry(void *zip, ENTRY *entry, FILE *in,
   uint32_t crc;
   int store;
   int result;
-  if(start_ect_job(&job, in, entry->expected_size, mode))
+  if(start_ect_job(&job, in, entry->expected_size, options))
   {
     free(job.input);
     return -1;
@@ -1139,17 +1379,12 @@ typedef struct {
   unsigned char *buffer;
   void *compressor;
   FILE *temporary;
-  ECT_JOB ect;
   uint32_t crc;
   uint64_t compressed_size;
 } TURTLE_WORK;
 
 static void finish_turtle_work(TURTLE_WORK *work)
 {
-  if(work->ect.started)
-    pthread_join(work->ect.thread, NULL);
-  free(work->ect.input);
-  free(work->ect.output);
   if(work->temporary)
     fclose(work->temporary);
   if(work->compressor)
@@ -1157,24 +1392,13 @@ static void finish_turtle_work(TURTLE_WORK *work)
   free(work->buffer);
 }
 
-static int prepare_turtle_work(TURTLE_WORK *work, FILE *in,
-  const ENTRY *entry, const turtledeflate_config_t *config)
+static int prepare_turtle_work(TURTLE_WORK *work,
+  const turtledeflate_config_t *config)
 {
   memset(work, 0, sizeof(*work));
   work->crc = UINT32_MAX;
   work->buffer = malloc((size_t)config->i_maximum_block_size);
-  if(!work->buffer)
-    return -1;
-  if(config->i_compression_level == 9 &&
-    start_ect_job(&work->ect, in, entry->expected_size, 9))
-    return -1;
-  if(work->ect.started)
-  {
-    work->temporary = tmpfile();
-    if(!work->temporary)
-      return -1;
-  }
-  return 0;
+  return work->buffer ? 0 : -1;
 }
 
 static int write_deflate_chunk(void *zip, FILE *temporary,
@@ -1244,59 +1468,17 @@ static int compress_turtle_blocks(void *zip, ENTRY *entry, FILE *in,
   return entry->size == entry->expected_size ? 0 : -1;
 }
 
-/* Level 9 tries ECT and Turtledeflate concurrently, then writes the winner. */
-static int write_turtle_winner(void *zip, ENTRY *entry,
-  const turtledeflate_config_t *config, TURTLE_WORK *work,
-  PROGRESS *progress)
-{
-  uint64_t chosen_size = work->compressed_size;
-  const unsigned char *data = NULL;
-  size_t offset = 0;
-  if(!work->ect.started)
-    return 0;
-  progress_wait(progress);
-  pthread_join(work->ect.thread, NULL);
-  work->ect.started = 0;
-  if(work->ect.crc != (work->crc ^ UINT32_MAX))
-    return -1;
-  if(work->ect.output && work->ect.output_size < chosen_size &&
-    work->ect.output_size <= UINT32_MAX)
-  {
-    chosen_size = work->ect.output_size;
-    data = work->ect.output;
-  }
-  if(open_zip_entry(zip, entry, MZ_COMPRESS_METHOD_DEFLATE,
-    zip_level_hint(config->i_compression_level)))
-    return -1;
-  if(!data && fseek(work->temporary, 0, SEEK_SET))
-    return -1;
-  while(offset < chosen_size)
-  {
-    size_t chunk = (size_t)(chosen_size - offset);
-    if(chunk > 65536)
-      chunk = 65536;
-    if(!data && fread(work->buffer, 1, chunk,
-      work->temporary) != chunk)
-      return -1;
-    if(write_zip_bytes(zip, data ? data + offset :
-      work->buffer, chunk))
-      return -1;
-    offset += chunk;
-  }
-  work->compressed_size = chosen_size;
-  return 0;
-}
-
 static int write_entry(void *zip, ENTRY *entry, FILE *in,
-  const turtledeflate_config_t *config, PROGRESS *progress)
+  const turtledeflate_config_t *config, int zip_level,
+  PROGRESS *progress)
 {
   TURTLE_WORK work;
   int result;
   int started = 0;
-  result = prepare_turtle_work(&work, in, entry, config);
-  if(!result && !work.temporary)
+  result = prepare_turtle_work(&work, config);
+  if(!result)
     result = open_zip_entry(zip, entry, MZ_COMPRESS_METHOD_DEFLATE,
-      zip_level_hint(config->i_compression_level));
+      zip_level);
   if(!result)
   {
     progress_start(progress, entry, config);
@@ -1304,14 +1486,244 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in,
     result = compress_turtle_blocks(zip, entry, in, config,
       &work, progress);
   }
-  if(!result)
-    result = write_turtle_winner(zip, entry, config, &work, progress);
   entry->compressed_size = work.compressed_size;
   if(!result)
     result = close_zip_entry(zip, entry, work.crc);
   finish_turtle_work(&work);
   if(started)
     progress_finish(progress, result == 0);
+  return result;
+}
+
+typedef struct {
+  unsigned char *data;
+  FILE *file;
+  uint64_t size;
+  uint32_t crc;
+} CANDIDATE;
+
+static void finish_candidate(CANDIDATE *candidate)
+{
+  free(candidate->data);
+  if(candidate->file)
+    fclose(candidate->file);
+}
+
+/* libdeflate needs a complete input buffer. Retain only its DEFLATE result. */
+static int make_fast_candidate(CANDIDATE *candidate, FILE *in,
+  uint32_t size, int level)
+{
+  struct libdeflate_compressor *compressor;
+  unsigned char *input;
+  size_t result;
+#if SIZE_MAX <= UINT32_MAX
+  if(size > SIZE_MAX - 16)
+    return -1;
+#endif
+  input = malloc(size ? (size_t)size : 1);
+  candidate->data = malloc((size_t)size + 16);
+  compressor = libdeflate_alloc_compressor(level);
+  if(!input || !candidate->data || !compressor)
+  {
+    free(input);
+    if(compressor)
+      libdeflate_free_compressor(compressor);
+    return -1;
+  }
+  if(fseek(in, 0, SEEK_SET) || fread(input, 1, size, in) != size ||
+    fgetc(in) != EOF || ferror(in))
+  {
+    free(input);
+    libdeflate_free_compressor(compressor);
+    return -1;
+  }
+  candidate->crc = update_crc(UINT32_MAX, input, size) ^ UINT32_MAX;
+  if(size)
+    result = libdeflate_deflate_compress(compressor, input, size,
+      candidate->data, (size_t)size + 16);
+  else
+  {
+    candidate->data[0] = 0x03;
+    candidate->data[1] = 0x00;
+    result = 2;
+  }
+  candidate->size = result ? result : UINT64_MAX;
+  free(input);
+  libdeflate_free_compressor(compressor);
+  return 0;
+}
+
+/* Turtledeflate streams to a temporary file so its result need not fit RAM. */
+static int make_turtle_candidate(CANDIDATE *candidate, FILE *in,
+  const ENTRY *entry, const turtledeflate_config_t *config,
+  PROGRESS *progress)
+{
+  TURTLE_WORK work = {0};
+  ENTRY copy = *entry;
+  int result;
+  copy.size = 0;
+  work.crc = UINT32_MAX;
+  work.buffer = malloc((size_t)config->i_maximum_block_size);
+  work.temporary = tmpfile();
+  if(!work.buffer || !work.temporary || fseek(in, 0, SEEK_SET))
+  {
+    finish_turtle_work(&work);
+    return -1;
+  }
+  result = compress_turtle_blocks(NULL, &copy, in, config,
+    &work, progress);
+  if(!result)
+  {
+    candidate->file = work.temporary;
+    candidate->size = work.compressed_size;
+    candidate->crc = work.crc ^ UINT32_MAX;
+    work.temporary = NULL;
+  }
+  finish_turtle_work(&work);
+  return result;
+}
+
+static void collect_ect_candidate(CANDIDATE *candidate, ECT_JOB *job,
+  uint32_t size)
+{
+  if(!size)
+  {
+    candidate->data = malloc(2);
+    if(candidate->data)
+    {
+      candidate->data[0] = 0x03;
+      candidate->data[1] = 0x00;
+      candidate->size = 2;
+    }
+    return;
+  }
+  candidate->data = job->output;
+  candidate->size = job->output && job->output_size ?
+    job->output_size : UINT64_MAX;
+  candidate->crc = job->crc;
+  job->output = NULL;
+}
+
+static int copy_candidate(void *zip, CANDIDATE *candidate)
+{
+  unsigned char buffer[65536];
+  uint64_t remaining = candidate->size;
+  if(candidate->data)
+    return write_zip_bytes(zip, candidate->data, (size_t)remaining);
+  if(fseek(candidate->file, 0, SEEK_SET))
+    return -1;
+  while(remaining)
+  {
+    size_t chunk = remaining < sizeof(buffer) ?
+      (size_t)remaining : sizeof(buffer);
+    if(fread(buffer, 1, chunk, candidate->file) != chunk ||
+      write_zip_bytes(zip, buffer, chunk))
+      return -1;
+    remaining -= chunk;
+  }
+  return 0;
+}
+
+static int write_best_candidate(void *zip, ENTRY *entry, FILE *in,
+  CANDIDATE *candidates, const COMPRESSION_CONFIG *config, int zip_level)
+{
+  uint64_t best_size = UINT64_MAX;
+  uint32_t crc = 0;
+  int best = -1;
+  int i;
+  int store;
+  int result;
+  int have_crc = 0;
+  for(i = 0; i < 3; ++i)
+  {
+    int enabled = i == 0 ? config->have_fast :
+      i == 1 ? config->have_ect : config->have_turtle;
+    if(!enabled)
+      continue;
+    if(!have_crc)
+    {
+      crc = candidates[i].crc;
+      have_crc = 1;
+    }
+    else if(candidates[i].crc != crc)
+      return -1;
+    /* Preserve Turtledeflate's result when it ties with ECT. */
+    if(candidates[i].size < best_size ||
+      (i == 2 && best >= 0 && candidates[i].size == best_size))
+    {
+      best_size = candidates[i].size;
+      best = i;
+    }
+  }
+  store = entry->expected_size &&
+    (best < 0 || best_size >= entry->expected_size);
+  if(!store && best < 0)
+    return -1;
+  entry->size = entry->expected_size;
+  entry->compressed_size = store ? entry->size : best_size;
+  if(entry->compressed_size > UINT32_MAX)
+    return -1;
+  result = open_zip_entry(zip, entry, store ?
+    MZ_COMPRESS_METHOD_STORE : MZ_COMPRESS_METHOD_DEFLATE,
+    zip_level);
+  if(!result)
+  {
+    if(store)
+      result = write_stored_input(zip, in, entry->size, crc);
+    else
+      result = copy_candidate(zip, &candidates[best]);
+  }
+  if(!result)
+    result = close_zip_entry(zip, entry, crc ^ UINT32_MAX);
+  return result;
+}
+
+/* All enabled compressors process the same input; keep the shortest stream. */
+static int write_race_entry(void *zip, ENTRY *entry, FILE *in,
+  const COMPRESSION_CONFIG *config, int zip_level, PROGRESS *progress)
+{
+  CANDIDATE candidates[3] = {{0}};
+  ECT_JOB ect = {0};
+  int result = 0;
+  int i;
+  progress_start(progress, entry,
+    config->have_turtle ? &config->turtle : NULL);
+  if(config->have_ect)
+  {
+    result = start_ect_job(&ect, in, entry->expected_size,
+      &config->ect);
+    if(!result && entry->expected_size && !ect.started && !ect.input)
+      result = -1;
+  }
+  if(!result && config->have_fast)
+    result = make_fast_candidate(&candidates[0], in,
+      entry->expected_size, config->fast_level);
+  if(!result && config->have_turtle)
+    result = make_turtle_candidate(&candidates[2], in, entry,
+      &config->turtle, progress);
+  if(ect.started)
+  {
+    progress_wait(progress);
+    pthread_join(ect.thread, NULL);
+    ect.started = 0;
+  }
+  else if(!result && ect.input)
+    ect_worker(&ect);
+  if(!result && config->have_ect)
+  {
+    collect_ect_candidate(&candidates[1], &ect,
+      entry->expected_size);
+    if(entry->expected_size == 0 && !candidates[1].data)
+      result = -1;
+  }
+  if(!result)
+    result = write_best_candidate(zip, entry, in,
+      candidates, config, zip_level);
+  free(ect.input);
+  free(ect.output);
+  for(i = 0; i < 3; ++i)
+    finish_candidate(&candidates[i]);
+  progress_finish(progress, result == 0);
   return result;
 }
 
@@ -1838,7 +2250,7 @@ static void finish_archive_output(ARCHIVE_OUTPUT *output)
 
 static int write_archive_entries(ARCHIVE_OUTPUT *output,
   ENTRY_LIST *list, const OPTIONS *options,
-  const turtledeflate_config_t *config, int fast_level)
+  const COMPRESSION_CONFIG *config)
 {
   size_t i;
   output->writer = mz_zip_writer_create();
@@ -1857,15 +2269,26 @@ static int write_archive_entries(ARCHIVE_OUTPUT *output,
         list->entries[i].path);
       return -1;
     }
-    if(options->level < 7)
+    if((uint64_t)list->entries[i].expected_size >= config->zlib_after)
+      result = write_zlib_entry(output->zip, &list->entries[i], in,
+        config->zlib_level, zip_level_hint(options->level),
+        &output->progress);
+    else if(config->have_fast + config->have_ect +
+      config->have_turtle > 1)
+      result = write_race_entry(output->zip, &list->entries[i], in,
+        config, zip_level_hint(options->level), &output->progress);
+    else if(config->have_fast)
       result = write_fast_entry(output->zip, &list->entries[i], in,
-        fast_level, zip_level_hint(options->level), &output->progress);
-    else if(options->level < 9)
+        config->fast_level, zip_level_hint(options->level),
+        &output->progress);
+    else if(config->have_ect)
       result = write_ect_entry(output->zip, &list->entries[i], in,
-        fast_level, zip_level_hint(options->level), &output->progress);
+        &config->ect, zip_level_hint(options->level),
+        &output->progress);
     else
       result = write_entry(output->zip, &list->entries[i], in,
-        config, &output->progress);
+        &config->turtle, zip_level_hint(options->level),
+        &output->progress);
     if(fclose(in))
       result = -1;
     if(result)
@@ -1942,7 +2365,7 @@ static int publish_archive(ARCHIVE_OUTPUT *output,
 }
 
 static int run_archive(int argc, char **argv, const OPTIONS *options,
-  const turtledeflate_config_t *config, int fast_level)
+  const COMPRESSION_CONFIG *config)
 {
   ENTRY_LIST list = {0};
   ARCHIVE_OUTPUT output = {0};
@@ -1969,8 +2392,7 @@ static int run_archive(int argc, char **argv, const OPTIONS *options,
   }
   if(!result)
   {
-    result = write_archive_entries(&output, &list, options,
-      config, fast_level);
+    result = write_archive_entries(&output, &list, options, config);
     if(!result)
       result = validate_archive(&output, &list);
     if(!result)
@@ -1991,12 +2413,11 @@ static int run_archive(int argc, char **argv, const OPTIONS *options,
 int main(int argc, char **argv)
 {
   OPTIONS options;
-  turtledeflate_config_t config;
-  int fast_level = 0;
+  COMPRESSION_CONFIG config;
   int result = parse_options(argc, argv, &options);
   if(result)
     return result < 0 ? 1 : 0;
-  if(load_config(argv[0], options.level, &config, &fast_level))
+  if(load_config(argv[0], options.level, &config))
     return 1;
-  return run_archive(argc, argv, &options, &config, fast_level);
+  return run_archive(argc, argv, &options, &config);
 }

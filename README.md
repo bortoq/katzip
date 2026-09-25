@@ -2,10 +2,10 @@
 
 Dedicated to the memory of Phil Katz (1962–2000), the father of ZIP.
 
-katzip creates ZIP files from regular files. Levels 1-6 use libdeflate for fast
-compression. Levels 7-8 use ECT's Zopfli variant. Level 9 compares
-Turtledeflate and ECT and keeps the smaller stream. minizip-ng writes the ZIP
-containers.
+katzip creates ZIP files from regular files. Each compression level has its
+own settings in `katzip.ini`. The built-in settings use libdeflate at levels
+1-6, ECT's Zopfli variant at levels 7-8, and a comparison of ECT and
+Turtledeflate at level 9. minizip-ng writes the ZIP containers.
 The katzip source is written in C99; ECT's code also needs a C++ compiler.
 
 ## Build
@@ -33,18 +33,13 @@ Run `make test` to build and run the archive integration tests.
 When no input is given, katzip uses the `@*` mask. Without `-r`, masks search
 only the current directory. With `-r`, they also search subdirectories.
 
-An optional `-1` to `-9` flag sets the compression level before the output path.
-Level 1 uses the least compression work, and level 9 uses the most. The default
-is level 7. Levels 1-6 use libdeflate on files up to 64 MiB and streaming zlib
-on larger files. Level 7 uses ECT mode 7, and level 8 uses ECT mode 9.
-If libdeflate or ECT cannot make a file smaller, katzip stores it without
-compression. A higher level can take much longer and does not always
-make a smaller archive. Level 9 runs Turtledeflate with the same settings and
-1,000,000-byte input blocks as `turtledeflate --9`, alongside ECT's Zopfli
-variant at ECT level 9. katzip stores whichever complete DEFLATE stream is
-smaller for each file. This preserves the original file bytes and needs more
-memory and temporary disk space than the other levels. ZIP headers still add
-their own bytes to the archive.
+An optional `-1` to `-9` flag selects one INI section before the output path.
+The default is level 7. The built-in settings use libdeflate for files under
+64 MiB at levels 1-6 and streaming zlib for larger files. Levels 7-8 use ECT;
+level 9 compares ECT and Turtledeflate and keeps the smaller raw DEFLATE
+stream. A higher level can take much longer and does not always make a smaller
+archive. Competing compressors need more memory and temporary disk space.
+ZIP headers add their own bytes to the archive.
 
 For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
 4-6 as Fast, 7-8 as Normal, and 9 as Maximum. These bits are informational;
@@ -56,16 +51,35 @@ first archive run, katzip checks for `katzip.ini` in the current directory and
 then next to its executable, including when launched through `PATH`. If neither
 exists, katzip creates `katzip.ini` next to the executable. The working
 directory receives a new INI only when it is also the executable directory.
-The file has sections `[libdeflate-1]` through `[libdeflate-6]`, `[ect-7]`,
-`[ect-8]`, and `[turtledeflate-9]`. Older INI files need these new ECT sections;
-remove an unedited old INI to regenerate it.
-You can edit it; katzip will not overwrite an existing INI. If it cannot
-create the file, it warns and uses the compiled settings. `KATZIP_INI` selects
-an explicit file and requires that file to exist. A found INI with a missing
-or invalid selected section is an error. `--print-default-ini` prints the
-compiled settings without creating a file.
-The maximum block size is 1,000,000 bytes; unsafe INI values are rejected
-before creating an archive.
+
+The INI has one section per command-line level, `[1]` through `[9]`. A
+`libdeflate_level` setting enables libdeflate. A complete `zopfli_*` group
+enables ECT. A complete `turtledeflate_*` group enables Turtledeflate. When
+more than one compressor group is present, katzip runs them on the same file
+and writes the shortest result. An incomplete group, duplicate setting or
+unknown setting in the selected section is an error. Turtledeflate's
+`i_compression_level` describes that compressor's work and need not match the
+INI section number.
+
+`zlib_after` replaces those compressors with streaming zlib when a file is at
+least the specified size. The value can be bytes, `KiB`, `MiB` or `GiB`, such
+as `16MiB`; `off` disables the switch and `0` uses zlib for every file.
+`zlib_level` selects zlib compression from 1 to 9. A section with only these
+two settings is valid when `zlib_after = 0`. The built-in thresholds are 64 MiB
+for levels 1-6 and `off` for levels 7-9. libdeflate and ECT read a whole file
+into memory, so disabling the zlib switch for large files can require a lot of
+RAM. `zopfli_multithreading` and `zopfli_isPNG` must stay zero in this build.
+The optional `katzip.2.ini` profile switches levels 7, 8 and 9 to zlib at
+16 MiB, 4 MiB and 2 MiB respectively. Select it with
+`KATZIP_INI=/path/to/katzip.2.ini`.
+
+You can edit the INI; katzip will not overwrite an existing one. Older INI
+formats must be replaced or converted to numbered sections. If katzip cannot
+create a new INI, it warns and uses its compiled settings. `KATZIP_INI`
+selects an explicit file and requires that file to exist. A missing or invalid
+selected section is an error. `--print-default-ini` prints the compiled
+settings without creating a file. Unsafe settings are rejected before an
+archive is created.
 
 If the output name has no extension, katzip adds `.zip`. A name with an
 extension is used as given. Each later argument is a file to add. The file
@@ -88,14 +102,13 @@ percentage with two decimal places on standard error. It refreshes once per
 second and stays below 100%. When a file is complete, the final line shows
 `100 * compressed_size / original_size` instead. The percentage is 0.00% for
 an empty input because the ratio is undefined. Stored files show 100.00%.
-At levels 1-6, the progress indicator follows completed input chunks; libdeflate
-does not report progress inside a buffer. ECT at levels 7-8 works on a complete
-file and does not report intermediate progress. Turtledeflate may revisit the
-same input block many times and cannot know in advance how many passes it will need.
-The percentage within a block is an estimate based on work already done; it
-reaches the exact block boundary when that block finishes. At level 9, progress
-follows Turtledeflate while ECT runs in parallel; the final ratio appears after
-both candidates finish.
+With zlib, progress follows completed input chunks. libdeflate and ECT work
+on a complete file and do not report intermediate progress. Turtledeflate
+may revisit the same input block many times. Its percentage within a block is
+an estimate based on work already done; it reaches the exact block boundary
+when that block finishes. During a comparison, the display follows
+Turtledeflate when enabled and shows the final ratio after every compressor
+finishes.
 
 katzip writes to a temporary file and replaces an existing output only after
 the new archive is complete. Ctrl+C (SIGINT) or SIGTERM removes the temporary
@@ -109,7 +122,8 @@ input file must be smaller than 4 GiB. The archive can contain at most 65,535
 files. Turtledeflate favors compression over speed, so level 9 can take
 time to process. Levels 1-6 may use roughly twice the input file size in memory
 for files up to 64 MiB. Levels 7-8 load each entire input file into memory;
-ECT may use several times the file size while optimizing it.
+ECT may use several times the file size while optimizing it. Custom
+configurations can use libdeflate or ECT on much larger files.
 
 minizip-ng writes raw DEFLATE streams without recompression.
 For normal files it uses 16 fewer ZIP metadata bytes per entry than the
@@ -119,17 +133,19 @@ each archive before an existing output is replaced.
 ## Reading the source
 
 The program follows a short pipeline in `main`: parse options, load one
-compression preset, then run the archive operation. `collect_entries` builds
-the input list. `write_archive_entries` chooses libdeflate or zlib for levels
-1-6, ECT for levels 7-8, and Turtledeflate plus ECT for level 9.
+compression section, then run the archive operation. `collect_entries` builds
+the input list. `write_archive_entries` applies the size switch and selects
+one compressor or the comparison path.
 `validate_archive` checks the exact ZIP size and reopens the temporary file.
 `publish_archive` changes its permissions, flushes it, then replaces the output.
 
 Resources belong to the function or context that creates them. `TURTLE_WORK`
 owns Turtledeflate's buffers, compressor, temporary stream and optional ECT
 thread. `ARCHIVE_OUTPUT` owns the temporary archive, ZIP reader and writer,
-progress thread and signal handlers. The corresponding cleanup functions run
-on both success and failure. Third-party sources remain unchanged.
+progress thread and signal handlers. During a comparison, each `CANDIDATE`
+owns its compressed buffer or temporary stream. The corresponding cleanup
+functions run on both success and failure. Third-party sources remain
+unchanged.
 
 ## Third-party code
 
