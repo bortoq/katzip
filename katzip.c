@@ -534,6 +534,18 @@ done:
   return status;
 }
 
+/* raw DEFLATE is already compressed; this level only sets the ZIP hint bits. */
+static int zip_level_hint(int level)
+{
+  if(level <= 3)
+    return 1;
+  if(level <= 6)
+    return 2;
+  if(level <= 8)
+    return 6;
+  return 9;
+}
+
 static int write_deflate_chunk(void *zip, FILE *temporary, const unsigned char *data, int size)
 {
   if(temporary)
@@ -542,7 +554,7 @@ static int write_deflate_chunk(void *zip, FILE *temporary, const unsigned char *
 }
 
 /* libdeflate compresses a complete buffer; large files use streaming zlib. */
-static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, PROGRESS *progress)
+static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, int zip_level, PROGRESS *progress)
 {
   mz_zip_file file_info;
   struct libdeflate_compressor *compressor = NULL;
@@ -598,7 +610,7 @@ static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, PROGRE
     if(size && (!output_size || output_size >= size))
       method = MZ_COMPRESS_METHOD_STORE;
     file_info.compression_method = method;
-    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+    if(mz_zip_entry_write_open(zip, &file_info, zip_level, 1, NULL) != MZ_OK)
       goto done;
     for(offset = 0; offset < (method == MZ_COMPRESS_METHOD_STORE ? size : output_size);)
     {
@@ -622,7 +634,7 @@ static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, PROGRE
     if(deflateInit2(&stream, level > 9 ? 9 : level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
       goto done;
     file_info.compression_method = MZ_COMPRESS_METHOD_DEFLATE;
-    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+    if(mz_zip_entry_write_open(zip, &file_info, zip_level, 1, NULL) != MZ_OK)
     {
       deflateEnd(&stream);
       goto done;
@@ -721,7 +733,7 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_co
   file_info.filename = entry->name;
   file_info.filename_size = entry->name_len;
   file_info.external_fa = entry->mode << 16;
-  if(!turtle_temp && mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+  if(!turtle_temp && mz_zip_entry_write_open(zip, &file_info, zip_level_hint(config->i_compression_level), 1, NULL) != MZ_OK)
     goto done;
   size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
   if(ferror(in))
@@ -775,7 +787,7 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_co
     use_ect = ect.output && ect.output_size < (uint64_t)compressed_total && ect.output_size <= UINT32_MAX;
     if(use_ect)
       chosen_total = (int64_t)ect.output_size;
-    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+    if(mz_zip_entry_write_open(zip, &file_info, zip_level_hint(config->i_compression_level), 1, NULL) != MZ_OK)
       goto done;
     if(!use_ect && fseek(turtle_temp, 0, SEEK_SET))
       goto done;
@@ -1203,7 +1215,7 @@ int main(int argc, char **argv)
   for(i = 0; i < (int)list.count; ++i)
   {
     in = fopen(list.entries[i].path, "rb");
-    if(!in || (level < 7 ? write_fast_entry(zip, &list.entries[i], in, fast_level, &progress) :
+    if(!in || (level < 7 ? write_fast_entry(zip, &list.entries[i], in, fast_level, zip_level_hint(level), &progress) :
       write_entry(zip, &list.entries[i], in, &config, &progress)))
     {
       fprintf(stderr, "katzip: cannot archive %s\n", list.entries[i].path);

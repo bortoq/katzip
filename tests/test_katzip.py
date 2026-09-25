@@ -2,6 +2,7 @@ import os
 import pathlib
 import resource
 import signal
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -134,6 +135,28 @@ class KatzipTests(unittest.TestCase):
             ratio = 100 * opened.getinfo("pattern.bin").compress_size / len(content)
         lines = result.stderr.decode().replace("\r", "\n").splitlines()
         self.assertEqual(lines[-1].rstrip(), f"pattern.bin {ratio:.2f}%")
+
+    def test_zip_level_hint_bits(self):
+        data = b"ZIP level hints and compression. " * 40
+        (self.root / "text.txt").write_bytes(data)
+        for level in range(1, 10):
+            result = self.run_katzip(f"-{level}", "archive", "text.txt")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            archive = (self.root / "archive.zip").read_bytes()
+            expected = 0x0006 if level <= 3 else 0x0004 if level <= 6 else 0x0000 if level <= 8 else 0x0002
+            with zipfile.ZipFile(self.root / "archive.zip") as opened:
+                info = opened.getinfo("text.txt")
+                self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
+                self.assertEqual(opened.read("text.txt"), data)
+                self.assertEqual(info.flag_bits & 0x0006, expected)
+                self.assertEqual(struct.unpack_from("<H", archive, 6)[0] & 0x0006, expected)
+        (self.root / "random.bin").write_bytes(os.urandom(65536))
+        result = self.run_katzip("-1", "stored", "random.bin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "stored.zip") as opened:
+            info = opened.getinfo("random.bin")
+            self.assertEqual(info.compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(info.flag_bits & 0x0006, 0)
 
     def test_fast_levels_and_store_fallback(self):
         content = b"A short repeated sentence.\n" * 1000

@@ -45,6 +45,11 @@ smaller for each file. This preserves the original file bytes and needs more
 memory and temporary disk space than the other levels. ZIP headers still add
 their own bytes to the archive.
 
+For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
+4-6 as Fast, 7-8 as Normal, and 9 as Maximum. These bits are informational;
+the key and the compressor name are not stored in the archive. Stored entries
+leave the DEFLATE hint bits clear.
+
 Compression levels come from `katzip.ini`: `[libdeflate-1]` through
 `[libdeflate-6]` select libdeflate levels, and `[turtledeflate-7]` through
 `[turtledeflate-9]` contain Turtledeflate settings. You can edit the values before
