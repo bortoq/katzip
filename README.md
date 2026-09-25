@@ -14,8 +14,7 @@ Run `make`. This creates `./katzip`. You need C and C++ compilers, `make`,
 (for example, `zlib1g-dev` and `libdeflate-dev` on Debian).
 The build copies Turtledeflate into a temporary directory, applies
 `patches/turtledeflate.patch` there, then removes the directory. The original
-files in `third_party/turtledeflate` stay untouched. Run `make ini` to generate
-an editable `katzip.ini` from the built-in defaults.
+files in `third_party/turtledeflate` stay untouched.
 Run `make test` to build and run the archive integration tests.
 
 ## Use
@@ -50,17 +49,18 @@ For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
 the key and the compressor name are not stored in the archive. Stored entries
 leave the DEFLATE hint bits clear.
 
-The default compression levels are compiled into katzip from
-`config_defaults.h`. Levels `[libdeflate-1]` through `[libdeflate-6]` select
-libdeflate levels; `[turtledeflate-7]` through `[turtledeflate-9]` contain
-Turtledeflate settings. Run `make ini` to write an editable `katzip.ini` from
-these defaults. The generated file is ignored by Git; running `make ini` again
-replaces it. katzip first checks for `katzip.ini` in the current directory,
-then next to the executable, including when launched through `PATH`. If neither
-exists, it warns once and uses the built-in settings for every compression
-level. Set `KATZIP_INI` to explicitly use another file; a missing or invalid
-explicit file is an error. A found INI with a missing or invalid selected
-section is also an error.
+Default compression settings are tables near the start of `katzip.c`. On the
+first archive run, katzip checks for `katzip.ini` in the current directory and
+then next to its executable, including when launched through `PATH`. If neither
+exists, katzip creates `katzip.ini` next to the executable. The working
+directory receives a new INI only when it is also the executable directory.
+The file has sections `[libdeflate-1]` through
+`[libdeflate-6]` and `[turtledeflate-7]` through `[turtledeflate-9]`.
+You can edit it; katzip will not overwrite an existing INI. If it cannot
+create the file, it warns and uses the compiled settings. `KATZIP_INI` selects
+an explicit file and requires that file to exist. A found INI with a missing
+or invalid selected section is an error. `--print-default-ini` prints the
+compiled settings without creating a file.
 The maximum block size is 1,000,000 bytes; unsafe INI values are rejected
 before creating an archive.
 

@@ -14,7 +14,7 @@ TURTLE_HEADERS = $(wildcard third_party/turtledeflate/inc/*.h third_party/turtle
 MINIZIP_FILES = $(wildcard third_party/minizip-ng/*.[ch] third_party/minizip-ng/CMakeLists.txt)
 ECT_FILES = $(wildcard third_party/ect/src/*.[ch] third_party/ect/src/zopfli/*.[ch] third_party/ect/src/zopfli/*.cpp)
 
-katzip: katzip.c config_defaults.h $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
+katzip: katzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
 	@set -eu; \
 	build_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$build_dir"' EXIT; \
@@ -44,17 +44,10 @@ katzip: katzip.c config_defaults.h $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FIL
 	  "$$build_dir/turtledeflate_block.o" "$$build_dir/turtledeflate_bitstream.o" \
 	  "$$build_dir"/ect_*.o "$$build_dir/minizip/libminizip-ng.a" -ldeflate -lz -lm
 
-ini: katzip
-	@set -eu; \
-	temporary=$$(mktemp katzip.ini.tmp.XXXXXX); \
-	trap 'rm -f "$$temporary"' EXIT; \
-	./katzip --print-default-ini > "$$temporary"; \
-	mv "$$temporary" katzip.ini
-
 clean:
 	rm -f katzip
 
 test: katzip
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
-.PHONY: clean test ini
+.PHONY: clean test

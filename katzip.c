@@ -23,7 +23,6 @@
 #include <libdeflate.h>
 #include <zlib.h>
 
-#include "config_defaults.h"
 #include "turtledeflate_api.h"
 #include "mz.h"
 #include "mz_strm.h"
@@ -89,6 +88,78 @@ typedef struct {
 /* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
 #define MAX_BLOCK_SIZE 1000000
 #define FAST_FILE_LIMIT (64U * 1024U * 1024U)
+
+/* Presets are the only source for both compression and generated INI files. */
+static const int fast_defaults[] = {1, 2, 3, 5, 6, 8};
+
+static const turtledeflate_config_t turtle_defaults[] = {
+  {
+    .i_compression_level = 7,
+    .i_maximum_block_size = 32768,
+    .i_maximum_subblocks = 8,
+    .i_max_block_splitter_iterations = 2,
+    .i_max_internal_block_splitter_iterations = 4,
+    .i_block_splitter_num_points = 7,
+    .i_block_splitter_center_dist = 2,
+    .i_block_splitter_min_range_for_points = 1024,
+    .b_block_splitter_push_split = false,
+    .i_min_start_fp = -3,
+    .i_max_start_fp = 1,
+    .i_num_start_fp = 3,
+    .i_verbose = 0
+  },
+  {
+    .i_compression_level = 8,
+    .i_maximum_block_size = 32768,
+    .i_maximum_subblocks = 16,
+    .i_max_block_splitter_iterations = 4,
+    .i_max_internal_block_splitter_iterations = 10,
+    .i_block_splitter_num_points = 15,
+    .i_block_splitter_center_dist = 4,
+    .i_block_splitter_min_range_for_points = 1024,
+    .b_block_splitter_push_split = false,
+    .i_min_start_fp = -4,
+    .i_max_start_fp = 3,
+    .i_num_start_fp = 6,
+    .i_verbose = 0
+  },
+  {
+    .i_compression_level = 9,
+    .i_maximum_block_size = 1000000,
+    .i_maximum_subblocks = 512,
+    .i_max_block_splitter_iterations = 30,
+    .i_max_internal_block_splitter_iterations = 100,
+    .i_block_splitter_num_points = 31,
+    .i_block_splitter_center_dist = 8,
+    .i_block_splitter_min_range_for_points = 1024,
+    .b_block_splitter_push_split = true,
+    .i_min_start_fp = -6,
+    .i_max_start_fp = 5,
+    .i_num_start_fp = 16,
+    .i_verbose = 0
+  }
+};
+
+/* The table also assigns one bit to each required Turtledeflate setting. */
+static const CONFIG_FIELD config_fields[] = {
+  {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
+  {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
+  {"i_maximum_subblocks", offsetof(turtledeflate_config_t, i_maximum_subblocks), 0},
+  {"i_max_block_splitter_iterations",
+    offsetof(turtledeflate_config_t, i_max_block_splitter_iterations), 0},
+  {"i_max_internal_block_splitter_iterations",
+    offsetof(turtledeflate_config_t, i_max_internal_block_splitter_iterations), 0},
+  {"i_block_splitter_num_points", offsetof(turtledeflate_config_t, i_block_splitter_num_points), 0},
+  {"i_block_splitter_center_dist",
+    offsetof(turtledeflate_config_t, i_block_splitter_center_dist), 0},
+  {"i_block_splitter_min_range_for_points",
+    offsetof(turtledeflate_config_t, i_block_splitter_min_range_for_points), 0},
+  {"b_block_splitter_push_split", offsetof(turtledeflate_config_t, b_block_splitter_push_split), 1},
+  {"i_min_start_fp", offsetof(turtledeflate_config_t, i_min_start_fp), 0},
+  {"i_max_start_fp", offsetof(turtledeflate_config_t, i_max_start_fp), 0},
+  {"i_num_start_fp", offsetof(turtledeflate_config_t, i_num_start_fp), 0},
+  {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
+};
 
 static const char *volatile signal_temp_path;
 
@@ -460,6 +531,119 @@ static int open_named_config(const char *name, FILE **file, char **path)
   return saved_error == ENOENT || saved_error == ENOTDIR ? 1 : -1;
 }
 
+/* Read a typed preset when no editable INI is available. */
+static void use_default_config(int level, turtledeflate_config_t *config,
+  int *fast_level)
+{
+  memset(config, 0, sizeof(*config));
+  *fast_level = 0;
+  if(level <= (int)ARRAY_N(fast_defaults))
+    *fast_level = fast_defaults[level - 1];
+  else
+    *config = turtle_defaults[level - 7];
+}
+
+static int default_field_value(const turtledeflate_config_t *config,
+  const CONFIG_FIELD *field)
+{
+  const unsigned char *address = (const unsigned char*)config + field->offset;
+  if(field->boolean)
+    return *(const bool*)address ? 1 : 0;
+  return *(const int32_t*)address;
+}
+
+/* The same tables drive the editable INI and the no-file fallback. */
+static int write_default_ini(FILE *file)
+{
+  size_t level;
+  size_t field;
+  if(fputs("# Compression settings for katzip. Levels 1-6 use libdeflate "
+    "on files up to\n# 64 MiB. Larger files use streaming zlib at the "
+    "selected level (capped at 9).\n# Levels 7-9 use Turtledeflate; "
+    "level 9 also tries ECT Zopfli.\n\n", file) == EOF)
+    return -1;
+  for(level = 0; level < ARRAY_N(fast_defaults); ++level)
+  {
+    if(fprintf(file, "[libdeflate-%zu]\nlevel = %d\n\n",
+      level + 1, fast_defaults[level]) < 0)
+      return -1;
+  }
+  for(level = 0; level < ARRAY_N(turtle_defaults); ++level)
+  {
+    if(fprintf(file, "[turtledeflate-%zu]\n", level + 7) < 0)
+      return -1;
+    for(field = 0; field < ARRAY_N(config_fields); ++field)
+    {
+      if(fprintf(file, "%s = %d\n", config_fields[field].name,
+        default_field_value(&turtle_defaults[level],
+          &config_fields[field])) < 0)
+        return -1;
+    }
+    if(level + 1 < ARRAY_N(turtle_defaults) &&
+      fputc('\n', file) == EOF)
+      return -1;
+  }
+  return ferror(file) ? -1 : 0;
+}
+
+/* Link publishes a complete file without replacing another process's INI. */
+static int create_default_ini(const char *path)
+{
+  char *temporary = malloc(strlen(path) + sizeof(".tmp.XXXXXX"));
+  FILE *file;
+  int descriptor;
+  int result;
+  int saved_error;
+  if(!temporary)
+  {
+    errno = ENOMEM;
+    return -1;
+  }
+  sprintf(temporary, "%s.tmp.XXXXXX", path);
+  descriptor = mkstemp(temporary);
+  if(descriptor < 0)
+  {
+    free(temporary);
+    return -1;
+  }
+  file = fdopen(descriptor, "w");
+  if(!file)
+  {
+    saved_error = errno;
+    close(descriptor);
+    unlink(temporary);
+    free(temporary);
+    errno = saved_error;
+    return -1;
+  }
+  result = write_default_ini(file);
+  if(fflush(file))
+    result = -1;
+  if(result == 0 && fsync(descriptor))
+    result = -1;
+  saved_error = errno;
+  if(fclose(file))
+  {
+    result = -1;
+    saved_error = errno;
+  }
+  if(result == 0 && link(temporary, path) && errno != EEXIST)
+  {
+    result = -1;
+    saved_error = errno;
+  }
+  if(unlink(temporary) && result == 0)
+  {
+    result = -1;
+    saved_error = errno;
+  }
+  free(temporary);
+  if(result)
+    errno = saved_error;
+  return result;
+}
+
+/* 0: opened INI; 1: use compiled presets; -1: invalid existing source. */
 static int open_config(const char *program, FILE **file, char **path)
 {
   const char *override = getenv("KATZIP_INI");
@@ -469,7 +653,8 @@ static int open_config(const char *program, FILE **file, char **path)
   {
     result = open_named_config(override, file, path);
     if(result == 1)
-      fprintf(stderr, "katzip: cannot open %s: %s\n", override, strerror(ENOENT));
+      fprintf(stderr, "katzip: cannot open %s: %s\n",
+        override, strerror(ENOENT));
     return result == 0 ? 0 : -1;
   }
   result = open_named_config("katzip.ini", file, path);
@@ -479,27 +664,25 @@ static int open_config(const char *program, FILE **file, char **path)
   if(installed_path)
   {
     result = open_named_config(installed_path, file, path);
+    if(result == 1)
+    {
+      if(create_default_ini(installed_path))
+      {
+        fprintf(stderr, "katzip: warning: cannot create %s: %s; "
+          "using built-in compression settings\n",
+          installed_path, strerror(errno));
+        free(installed_path);
+        return 1;
+      }
+      result = open_named_config(installed_path, file, path);
+    }
     free(installed_path);
     if(result != 1)
       return result;
   }
-  *path = strdup("built-in settings");
-  if(!*path)
-  {
-    fprintf(stderr, "katzip: out of memory\n");
-    return -1;
-  }
-  *file = fmemopen((void*)katzip_default_ini,
-    sizeof(katzip_default_ini) - 1, "r");
-  if(!*file)
-  {
-    fprintf(stderr, "katzip: cannot read built-in settings: %s\n",
-      strerror(errno));
-    return -1;
-  }
-  fprintf(stderr, "katzip: warning: katzip.ini not found in current "
-    "or executable directory; using built-in compression settings\n");
-  return 0;
+  fprintf(stderr, "katzip: warning: katzip.ini unavailable beside "
+    "the executable; using built-in compression settings\n");
+  return 1;
 }
 
 static int valid_config(const turtledeflate_config_t *config, int level)
@@ -526,27 +709,6 @@ static int valid_config(const turtledeflate_config_t *config, int level)
     config->i_verbose >= TURTLEDEFLATE_VERBOSE_NONE &&
     config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
 }
-
-/* The table also assigns one bit to each required Turtledeflate setting. */
-static const CONFIG_FIELD config_fields[] = {
-  {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
-  {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
-  {"i_maximum_subblocks", offsetof(turtledeflate_config_t, i_maximum_subblocks), 0},
-  {"i_max_block_splitter_iterations",
-    offsetof(turtledeflate_config_t, i_max_block_splitter_iterations), 0},
-  {"i_max_internal_block_splitter_iterations",
-    offsetof(turtledeflate_config_t, i_max_internal_block_splitter_iterations), 0},
-  {"i_block_splitter_num_points", offsetof(turtledeflate_config_t, i_block_splitter_num_points), 0},
-  {"i_block_splitter_center_dist",
-    offsetof(turtledeflate_config_t, i_block_splitter_center_dist), 0},
-  {"i_block_splitter_min_range_for_points",
-    offsetof(turtledeflate_config_t, i_block_splitter_min_range_for_points), 0},
-  {"b_block_splitter_push_split", offsetof(turtledeflate_config_t, b_block_splitter_push_split), 1},
-  {"i_min_start_fp", offsetof(turtledeflate_config_t, i_min_start_fp), 0},
-  {"i_max_start_fp", offsetof(turtledeflate_config_t, i_max_start_fp), 0},
-  {"i_num_start_fp", offsetof(turtledeflate_config_t, i_num_start_fp), 0},
-  {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
-};
 
 /* Keep parsing separate from file lookup so both INI sources use one validator. */
 static int parse_setting(char *line, int level, turtledeflate_config_t *config,
@@ -676,9 +838,15 @@ static int load_config(const char *program, int level,
   char *path = NULL;
   FILE *file;
   int result;
-  if(open_config(program, &file, &path))
+  result = open_config(program, &file, &path);
+  if(result != 0)
   {
     free(path);
+    if(result > 0)
+    {
+      use_default_config(level, config, fast_level);
+      return 0;
+    }
     return -1;
   }
   result = read_config(file, path, level, config, fast_level);
@@ -1394,8 +1562,7 @@ static int parse_options(int argc, char **argv, OPTIONS *options)
     const char *argument = argv[options->archive_arg];
     if(strcmp(argument, "--print-default-ini") == 0)
     {
-      if(fputs(katzip_default_ini, stdout) == EOF ||
-        fflush(stdout) == EOF)
+      if(write_default_ini(stdout) || fflush(stdout) == EOF)
       {
         fprintf(stderr, "katzip: cannot write default settings\n");
         return -1;

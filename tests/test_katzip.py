@@ -265,7 +265,7 @@ class KatzipTests(unittest.TestCase):
             self.assertIn(b"invalid setting", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
 
-    def test_ini_search_order_and_embedded_levels(self):
+    def test_ini_search_order_and_automatic_generation(self):
         binary_dir = self.root / "bin"
         document_dir = self.root / "documents"
         binary_dir.mkdir()
@@ -305,14 +305,44 @@ class KatzipTests(unittest.TestCase):
         for level in range(1, 10):
             result = run(level)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(b"using built-in compression settings", result.stderr)
+            self.assertNotIn(b"warning", result.stderr)
+            self.assertEqual(executable_ini.read_text(), defaults)
+            self.assertEqual(list(binary_dir.glob("katzip.ini.tmp.*")), [])
+            self.assertFalse(current_ini.exists())
             with zipfile.ZipFile(document_dir / "archive.zip") as archive:
                 self.assertEqual(archive.read("input.txt"), (document_dir / "input.txt").read_bytes())
 
+        executable_ini.unlink()
         environment["KATZIP_INI"] = str(executable_ini)
         result = run(1)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"cannot open", result.stderr)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write to read-only directories")
+    def test_read_only_binary_directory_uses_compiled_settings(self):
+        binary_dir = self.root / "bin"
+        document_dir = self.root / "documents"
+        binary_dir.mkdir()
+        document_dir.mkdir()
+        shutil.copy2(PROGRAM, binary_dir / "katzip")
+        (document_dir / "input.txt").write_text("data " * 100)
+        binary_dir.chmod(0o555)
+        environment = dict(os.environ)
+        environment.pop("KATZIP_INI", None)
+        try:
+            result = subprocess.run(
+                [str(binary_dir / "katzip"), "-1", "archive", "input.txt"],
+                cwd=document_dir, env=environment, capture_output=True
+            )
+        finally:
+            binary_dir.chmod(0o755)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"using built-in compression settings", result.stderr)
+        self.assertFalse((binary_dir / "katzip.ini").exists())
+        self.assertFalse((document_dir / "katzip.ini").exists())
+        with zipfile.ZipFile(document_dir / "archive.zip") as archive:
+            self.assertEqual(archive.read("input.txt"),
+                             (document_dir / "input.txt").read_bytes())
 
     def test_recursive_masks_select_files_in_subdirectories(self):
         (self.root / "src" / "nested").mkdir(parents=True)
