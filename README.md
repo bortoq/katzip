@@ -13,6 +13,8 @@ Keep `turzip.ini` next to the executable.
 ```sh
 ./turzip archive.zip file1.txt folder/file2.txt
 ./turzip -9 archive.zip file1.txt folder/file2.txt
+./turzip -r backup folder
+./turzip -r -9 texts '*.txt'
 ```
 
 An optional `-1` to `-9` flag sets the compression level before the output path.
@@ -29,17 +31,26 @@ in the current directory. Set `TURZIP_INI` to use a file at another path.
 turzip stops with an error if the selected section or a required setting is
 missing or invalid.
 
-The output path is used exactly as given, so add
-`.zip` yourself if you want that extension. Each later argument is a file to
-add. The file keeps its relative path inside the archive. UTF-8 file names are
-marked as UTF-8 in the ZIP headers.
+If the output name has no extension, turzip adds `.zip`. A name with an
+extension is used as given. Each later argument is a file to add. The file
+keeps its relative path inside the archive. UTF-8 file names are marked as
+UTF-8 in the ZIP headers.
 
-While compressing, turzip shows each file name, a progress bar, and the percent
-of that file processed on standard error.
+Use `-r` to add all regular files in a directory and its subdirectories. With
+`-r`, a file mask such as `'*.txt'` searches the current directory and all its
+subdirectories. A mask such as `'folder/*.txt'` starts in `folder`. Quote a mask
+so your shell passes it to turzip instead of expanding it first. Symbolic links
+found while walking directories are skipped.
+
+While compressing, turzip shows each file name and its completed percentage to
+two decimal places on standard error. It refreshes the display once per second.
+The percentage changes when a compression block finishes, so level 9 can show
+the same value for several seconds.
 
 turzip replaces an existing output file. It returns a nonzero exit status on
-error. It does not accept directories, absolute input paths, duplicate entry
-names, or `..` path components.
+error. Without `-r`, it does not accept directories. Absolute input paths and
+`..` path components are not accepted. Repeated files found during a recursive
+search are added only once.
 
 This program writes standard ZIP files without ZIP64. An archive and each
 input file must be smaller than 4 GiB. The archive can contain at most 65,535

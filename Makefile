@@ -8,7 +8,7 @@ TURTLE_SRC = \
 	third_party/turtledeflate/lib/turtledeflate_bitstream.c
 
 turzip: turzip.c $(TURTLE_SRC)
-	$(CC) $(CFLAGS) -Ithird_party/turtledeflate/inc -Ithird_party/turtledeflate/lib -o $@ turzip.c $(TURTLE_SRC) -lm
+	$(CC) $(CFLAGS) -pthread -Ithird_party/turtledeflate/inc -Ithird_party/turtledeflate/lib -o $@ turzip.c $(TURTLE_SRC) -lm
 
 clean:
 	rm -f turzip

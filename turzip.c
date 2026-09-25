@@ -1,5 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fnmatch.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +40,24 @@ typedef struct {
   size_t offset;
   int boolean;
 } CONFIG_FIELD;
+
+typedef struct {
+  ENTRY *entries;
+  size_t count;
+  size_t capacity;
+  struct stat archive_stat;
+  int archive_exists;
+} ENTRY_LIST;
+
+typedef struct {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  pthread_t thread;
+  const ENTRY *entry;
+  uint32_t done;
+  int active;
+  int stop;
+} PROGRESS;
 
 #define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
 
@@ -143,14 +166,94 @@ static int valid_utf8(const char *name)
   return 1;
 }
 
-static void show_progress(const ENTRY *entry, int percent)
+static void show_progress(const ENTRY *entry, uint32_t done)
 {
-  int i;
-  fprintf(stderr, "\r%s [", entry->name);
-  for(i = 0; i < 30; ++i)
-    fputc(i < percent * 30 / 100 ? '#' : '-', stderr);
-  fprintf(stderr, "] %3d%%", percent);
+  uint64_t percent = entry->expected_size ? (uint64_t)done * 10000 / entry->expected_size : 10000;
+  if(percent > 10000)
+    percent = 10000;
+  fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
+    (unsigned long long)(percent / 100), (unsigned long long)(percent % 100));
   fflush(stderr);
+}
+
+static void *progress_thread(void *argument)
+{
+  PROGRESS *progress = (PROGRESS*)argument;
+  struct timespec deadline;
+  int result;
+  pthread_mutex_lock(&progress->mutex);
+  while(!progress->stop)
+  {
+    while(!progress->active && !progress->stop)
+      pthread_cond_wait(&progress->condition, &progress->mutex);
+    if(progress->stop)
+      break;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    ++deadline.tv_sec;
+    result = pthread_cond_timedwait(&progress->condition, &progress->mutex, &deadline);
+    if(result == ETIMEDOUT && progress->active)
+      show_progress(progress->entry, progress->done);
+  }
+  pthread_mutex_unlock(&progress->mutex);
+  return NULL;
+}
+
+static int progress_init(PROGRESS *progress)
+{
+  memset(progress, 0, sizeof(*progress));
+  if(pthread_mutex_init(&progress->mutex, NULL))
+    return -1;
+  if(pthread_cond_init(&progress->condition, NULL))
+  {
+    pthread_mutex_destroy(&progress->mutex);
+    return -1;
+  }
+  if(pthread_create(&progress->thread, NULL, progress_thread, progress))
+  {
+    pthread_cond_destroy(&progress->condition);
+    pthread_mutex_destroy(&progress->mutex);
+    return -1;
+  }
+  return 0;
+}
+
+static void progress_start(PROGRESS *progress, const ENTRY *entry)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->entry = entry;
+  progress->done = 0;
+  progress->active = 1;
+  show_progress(entry, 0);
+  pthread_cond_signal(&progress->condition);
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_update(PROGRESS *progress, uint32_t done)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->done = done;
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_finish(PROGRESS *progress, int success)
+{
+  pthread_mutex_lock(&progress->mutex);
+  show_progress(progress->entry, success ? progress->entry->expected_size : progress->done);
+  fputc('\n', stderr);
+  progress->active = 0;
+  pthread_cond_signal(&progress->condition);
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_destroy(PROGRESS *progress)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->stop = 1;
+  pthread_cond_signal(&progress->condition);
+  pthread_mutex_unlock(&progress->mutex);
+  pthread_join(progress->thread, NULL);
+  pthread_cond_destroy(&progress->condition);
+  pthread_mutex_destroy(&progress->mutex);
 }
 
 static void set_dos_time(ENTRY *entry, time_t value)
@@ -378,7 +481,7 @@ done:
   return status;
 }
 
-static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_config_t *config)
+static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
 {
   unsigned char *buffer;
   unsigned char *compressed;
@@ -389,8 +492,6 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
   size_t size;
   int next;
   int compressed_size;
-  int percent;
-  int last_percent = 0;
   int progress_started = 0;
   int status = -1;
 
@@ -406,7 +507,7 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
     goto done;
   if(size && !turtledeflate_create(&compressor, &compressor_config))
     goto done;
-  show_progress(entry, 0);
+  progress_start(progress, entry);
   progress_started = 1;
   while(size)
   {
@@ -422,14 +523,7 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
     compressed_size = turtledeflate_block(compressor, (int32_t)size, buffer, &compressed, NULL, next == EOF);
     if(compressed_size < 0 || write_bytes(out, compressed, (size_t)compressed_size))
       goto done;
-    percent = entry->expected_size ? (int)((uint64_t)entry->size * 100 / entry->expected_size) : 100;
-    if(percent > 100)
-      percent = 100;
-    if(percent > last_percent)
-    {
-      show_progress(entry, percent);
-      last_percent = percent;
-    }
+    progress_update(progress, entry->size);
     if(next == EOF)
       break;
     size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
@@ -453,102 +547,358 @@ done:
     turtledeflate_destroy(compressor);
   free(buffer);
   if(progress_started)
+    progress_finish(progress, status == 0);
+  return status;
+}
+
+static char *copy_text(const char *text)
+{
+  char *copy = malloc(strlen(text) + 1);
+  if(copy)
+    strcpy(copy, text);
+  return copy;
+}
+
+static char *archive_name(const char *argument)
+{
+  const char *base = strrchr(argument, '/');
+  const char *dot;
+  size_t length = strlen(argument);
+  char *name;
+  base = base ? base + 1 : argument;
+  if(!*base)
+    return NULL;
+  dot = strrchr(base, '.');
+  if(dot && dot > base && dot[1])
+    return copy_text(argument);
+  name = malloc(length + 5);
+  if(!name)
+    return NULL;
+  strcpy(name, argument);
+  if(dot && dot[1] == 0)
+    strcat(name, "zip");
+  else
+    strcat(name, ".zip");
+  return name;
+}
+
+static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
+{
+  const char *name = path;
+  struct stat file_stat;
+  ENTRY *entry;
+  ENTRY *grown;
+  size_t capacity;
+  size_t i;
+  while(name[0] == '.' && name[1] == '/')
+    name += 2;
+  if(!valid_name(name) || strlen(name) > UINT16_MAX || stat(path, &file_stat) ||
+    !S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
+    (uint64_t)file_stat.st_size > UINT32_MAX)
   {
-    if(status == 0 && last_percent < 100)
-      show_progress(entry, 100);
-    fputc('\n', stderr);
+    fprintf(stderr, "turzip: invalid input file: %s\n", path);
+    return -1;
+  }
+  if(list->archive_exists && list->archive_stat.st_dev == file_stat.st_dev &&
+    list->archive_stat.st_ino == file_stat.st_ino)
+  {
+    if(recursive)
+      return 0;
+    fprintf(stderr, "turzip: archive is an input file: %s\n", path);
+    return -1;
+  }
+  for(i = 0; i < list->count; ++i)
+  {
+    if(strcmp(name, list->entries[i].name) == 0)
+    {
+      if(recursive)
+        return 0;
+      fprintf(stderr, "turzip: duplicate entry: %s\n", name);
+      return -1;
+    }
+  }
+  if(list->count == UINT16_MAX)
+  {
+    fprintf(stderr, "turzip: too many files\n");
+    return -1;
+  }
+  if(list->count == list->capacity)
+  {
+    capacity = list->capacity ? list->capacity * 2 : 16;
+    if(capacity > UINT16_MAX)
+      capacity = UINT16_MAX;
+    grown = realloc(list->entries, capacity * sizeof(*grown));
+    if(!grown)
+    {
+      fprintf(stderr, "turzip: out of memory\n");
+      return -1;
+    }
+    list->entries = grown;
+    list->capacity = capacity;
+  }
+  entry = &list->entries[list->count];
+  memset(entry, 0, sizeof(*entry));
+  entry->path = copy_text(path);
+  entry->name = copy_text(name);
+  if(!entry->path || !entry->name)
+  {
+    free((void*)entry->path);
+    free((void*)entry->name);
+    fprintf(stderr, "turzip: out of memory\n");
+    return -1;
+  }
+  entry->name_len = (uint16_t)strlen(name);
+  entry->flags = (uint16_t)(8 | (valid_utf8(name) ? 0x0800 : 0));
+  entry->mode = (uint32_t)file_stat.st_mode;
+  entry->expected_size = (uint32_t)file_stat.st_size;
+  set_dos_time(entry, file_stat.st_mtime);
+  ++list->count;
+  return 0;
+}
+
+static char *join_path(const char *directory, const char *name)
+{
+  size_t prefix = strcmp(directory, ".") == 0 ? 0 : strlen(directory);
+  size_t length = strlen(name);
+  char *path = malloc(prefix + length + 2);
+  if(!path)
+    return NULL;
+  if(prefix)
+  {
+    memcpy(path, directory, prefix);
+    path[prefix++] = '/';
+  }
+  memcpy(path + prefix, name, length + 1);
+  return path;
+}
+
+static int has_wildcard(const char *text)
+{
+  return strpbrk(text, "*?[") != NULL;
+}
+
+static int matches_pattern(const char *pattern, const char *relative, const char *basename)
+{
+  const char *suffix;
+  if(!pattern)
+    return 1;
+  if(!strchr(pattern, '/'))
+    return fnmatch(pattern, basename, 0) == 0;
+  for(suffix = relative; ; ++suffix)
+  {
+    if(fnmatch(pattern, suffix, FNM_PATHNAME) == 0)
+      return 1;
+    suffix = strchr(suffix, '/');
+    if(!suffix)
+      break;
+  }
+  return 0;
+}
+
+static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char *pattern)
+{
+  DIR *stream = opendir(directory);
+  struct dirent *item;
+  struct stat file_stat;
+  char *path;
+  const char *relative;
+  int status = 0;
+  if(!stream)
+  {
+    fprintf(stderr, "turzip: cannot open directory %s: %s\n", directory, strerror(errno));
+    return -1;
+  }
+  for(;;)
+  {
+    errno = 0;
+    item = readdir(stream);
+    if(!item)
+    {
+      if(errno)
+        status = -1;
+      break;
+    }
+    if(strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0)
+      continue;
+    path = join_path(directory, item->d_name);
+    if(!path)
+    {
+      status = -1;
+      break;
+    }
+    if(lstat(path, &file_stat))
+    {
+      fprintf(stderr, "turzip: cannot inspect %s: %s\n", path, strerror(errno));
+      status = -1;
+    }
+    else if(S_ISDIR(file_stat.st_mode))
+      status = walk_directory(list, path, root, pattern);
+    else if(S_ISREG(file_stat.st_mode))
+    {
+      relative = strcmp(root, ".") == 0 ? path : path + strlen(root) + 1;
+      if(matches_pattern(pattern, relative, item->d_name))
+        status = add_entry(list, path, 1);
+    }
+    free(path);
+    if(status)
+      break;
+  }
+  if(closedir(stream))
+    status = -1;
+  return status;
+}
+
+static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
+{
+  const char *magic;
+  const char *slash;
+  const char *name = argument;
+  struct stat file_stat;
+  char *root;
+  const char *pattern;
+  size_t prefix;
+  size_t before = list->count;
+  int status;
+  while(name[0] == '.' && name[1] == '/')
+    name += 2;
+  if(!valid_name(name))
+  {
+    fprintf(stderr, "turzip: invalid input: %s\n", argument);
+    return -1;
+  }
+  magic = strpbrk(argument, "*?[");
+  if(recursive && magic)
+  {
+    slash = NULL;
+    for(pattern = argument; pattern < magic; ++pattern)
+    {
+      if(*pattern == '/')
+        slash = pattern;
+    }
+    prefix = slash ? (size_t)(slash - argument) : 0;
+    root = prefix ? malloc(prefix + 1) : copy_text(".");
+    if(!root)
+      return -1;
+    if(prefix)
+    {
+      memcpy(root, argument, prefix);
+      root[prefix] = 0;
+    }
+    pattern = slash ? slash + 1 : argument;
+    status = walk_directory(list, root, root, pattern);
+    free(root);
+  }
+  else if(recursive && !stat(argument, &file_stat) && S_ISDIR(file_stat.st_mode))
+  {
+    root = copy_text(argument);
+    if(!root)
+      return -1;
+    prefix = strlen(root);
+    while(prefix > 1 && root[prefix - 1] == '/')
+      root[--prefix] = 0;
+    status = walk_directory(list, root, root, NULL);
+    free(root);
+  }
+  else
+    status = add_entry(list, argument, 0);
+  if(!status && recursive && has_wildcard(argument) && list->count == before)
+  {
+    fprintf(stderr, "turzip: no files match %s\n", argument);
+    return -1;
   }
   return status;
 }
 
+static void free_entries(ENTRY_LIST *list)
+{
+  size_t i;
+  for(i = 0; i < list->count; ++i)
+  {
+    free((void*)list->entries[i].path);
+    free((void*)list->entries[i].name);
+  }
+  free(list->entries);
+}
+
 int main(int argc, char **argv)
 {
-  ENTRY *entries;
+  ENTRY_LIST list;
+  PROGRESS progress;
   OUTPUT out;
-  struct stat archive_stat;
-  struct stat file_stat;
   FILE *in;
+  char *archive_path;
   uint32_t central_offset;
   uint32_t central_size;
   turtledeflate_config_t config;
   int archive_arg = 1;
-  int file_arg;
   int level = 7;
+  int recursive = 0;
+  int progress_ready = 0;
   int i;
-  int j;
   int status = 1;
 
-  if(argc > 1 && argv[1][0] == '-')
+  while(archive_arg < argc && argv[archive_arg][0] == '-')
   {
-    if(argv[1][1] < '1' || argv[1][1] > '9' || argv[1][2])
+    if(strcmp(argv[archive_arg], "--") == 0)
     {
-      fprintf(stderr, "turzip: invalid compression level: %s\n", argv[1]);
+      ++archive_arg;
+      break;
+    }
+    if(strcmp(argv[archive_arg], "-r") == 0)
+      recursive = 1;
+    else if(argv[archive_arg][1] >= '1' && argv[archive_arg][1] <= '9' && !argv[archive_arg][2])
+      level = argv[archive_arg][1] - '0';
+    else
+    {
+      fprintf(stderr, "turzip: unknown option: %s\n", argv[archive_arg]);
       return 1;
     }
-    level = argv[1][1] - '0';
-    archive_arg = 2;
+    ++archive_arg;
   }
-  file_arg = archive_arg + 1;
-  if(argc <= file_arg || argc - file_arg > UINT16_MAX)
+  if(argc <= archive_arg + 1)
   {
-    fprintf(stderr, "usage: turzip [-1..-9] archive_name file[s]\n");
+    fprintf(stderr, "usage: turzip [-1..-9] [-r] archive_name file[s]\n");
     return 1;
   }
   if(load_config(argv[0], level, &config))
     return 1;
-  entries = calloc((size_t)(argc - file_arg), sizeof(*entries));
-  if(!entries)
+  archive_path = archive_name(argv[archive_arg]);
+  if(!archive_path)
   {
-    fprintf(stderr, "turzip: out of memory\n");
+    fprintf(stderr, "turzip: invalid archive name\n");
     return 1;
   }
-  for(i = file_arg; i < argc; ++i)
+  memset(&list, 0, sizeof(list));
+  list.archive_exists = stat(archive_path, &list.archive_stat) == 0;
+  for(i = archive_arg + 1; i < argc; ++i)
   {
-    const char *name = argv[i];
-    while(name[0] == '.' && name[1] == '/')
-      name += 2;
-    if(!valid_name(name) || strlen(name) > UINT16_MAX || stat(argv[i], &file_stat) ||
-      !S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
-      (uint64_t)file_stat.st_size > UINT32_MAX)
-    {
-      fprintf(stderr, "turzip: invalid input file: %s\n", argv[i]);
+    if(add_argument(&list, argv[i], recursive))
       goto done;
-    }
-    for(j = file_arg; j < i; ++j)
-    {
-      if(strcmp(name, entries[j - file_arg].name) == 0)
-      {
-        fprintf(stderr, "turzip: duplicate entry: %s\n", name);
-        goto done;
-      }
-    }
-    if(!stat(argv[archive_arg], &archive_stat) && archive_stat.st_dev == file_stat.st_dev &&
-      archive_stat.st_ino == file_stat.st_ino)
-    {
-      fprintf(stderr, "turzip: archive is an input file: %s\n", argv[i]);
-      goto done;
-    }
-    entries[i - file_arg].path = argv[i];
-    entries[i - file_arg].name = name;
-    entries[i - file_arg].name_len = (uint16_t)strlen(name);
-    entries[i - file_arg].flags = (uint16_t)(8 | (valid_utf8(name) ? 0x0800 : 0));
-    entries[i - file_arg].mode = (uint32_t)file_stat.st_mode;
-    entries[i - file_arg].expected_size = (uint32_t)file_stat.st_size;
-    set_dos_time(&entries[i - file_arg], file_stat.st_mtime);
   }
-  out.file = fopen(argv[archive_arg], "wb");
+  if(!list.count)
+  {
+    fprintf(stderr, "turzip: no files to archive\n");
+    goto done;
+  }
+  if(progress_init(&progress))
+  {
+    fprintf(stderr, "turzip: cannot start progress display\n");
+    goto done;
+  }
+  progress_ready = 1;
+  out.file = fopen(archive_path, "wb");
   if(!out.file)
   {
-    fprintf(stderr, "turzip: cannot create %s: %s\n", argv[archive_arg], strerror(errno));
+    fprintf(stderr, "turzip: cannot create %s: %s\n", archive_path, strerror(errno));
     goto done;
   }
   out.offset = 0;
-  for(i = 0; i < argc - file_arg; ++i)
+  for(i = 0; i < (int)list.count; ++i)
   {
-    in = fopen(entries[i].path, "rb");
-    if(!in || write_entry(&out, &entries[i], in, &config))
+    in = fopen(list.entries[i].path, "rb");
+    if(!in || write_entry(&out, &list.entries[i], in, &config, &progress))
     {
-      fprintf(stderr, "turzip: cannot archive %s\n", entries[i].path);
+      fprintf(stderr, "turzip: cannot archive %s\n", list.entries[i].path);
       if(in)
         fclose(in);
       goto output_error;
@@ -557,27 +907,30 @@ int main(int argc, char **argv)
       goto output_error;
   }
   central_offset = (uint32_t)out.offset;
-  for(i = 0; i < argc - file_arg; ++i)
+  for(i = 0; i < (int)list.count; ++i)
   {
-    if(write_central_header(&out, &entries[i]))
+    if(write_central_header(&out, &list.entries[i]))
       goto output_error;
   }
   central_size = (uint32_t)out.offset - central_offset;
-  if(write_end(&out, (uint16_t)(argc - file_arg), central_offset, central_size))
+  if(write_end(&out, (uint16_t)list.count, central_offset, central_size))
     goto output_error;
   if(fclose(out.file))
   {
-    remove(argv[archive_arg]);
+    remove(archive_path);
     goto done;
   }
   status = 0;
   goto done;
 
 output_error:
-  fprintf(stderr, "turzip: failed to write archive %s\n", argv[archive_arg]);
+  fprintf(stderr, "turzip: failed to write archive %s\n", archive_path);
   fclose(out.file);
-  remove(argv[archive_arg]);
+  remove(archive_path);
 done:
-  free(entries);
+  if(progress_ready)
+    progress_destroy(&progress);
+  free_entries(&list);
+  free(archive_path);
   return status;
 }
