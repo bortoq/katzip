@@ -23,10 +23,15 @@ Run `make test` to build and run the archive integration tests.
 ```sh
 ./katzip archive.zip file1.txt folder/file2.txt
 ./katzip -9 archive.zip file1.txt folder/file2.txt
-./katzip -r backup folder
-./katzip -r -9 texts folder @*.txt @*.fb2
-./katzip -r texts @*.txt
+./katzip -1 archive            # add matching files from the current directory
+./katzip -r backup              # also search subdirectories
+./katzip -r -9 texts @*.txt @*.fb2
+./katzip --help
 ```
+
+`--help` and `-h` print the v1.1 usage message. An archive name is required.
+When no input is given, katzip uses the `@*` mask. Without `-r`, masks search
+only the current directory. With `-r`, they also search subdirectories.
 
 An optional `-1` to `-9` flag sets the compression level before the output path.
 Level 1 uses the least compression work, and level 9 uses the most. The default
@@ -57,22 +62,27 @@ UTF-8 in the ZIP headers.
 
 Use `-r` to visit all regular files in each named directory and its
 subdirectories. Add one or more masks with an `@` prefix, such as `@*.txt` or
-`@nested/*.txt`. A mask without `/` matches file names at any depth; a mask
-with `/` matches paths relative to each named directory. Files matching any
-mask are included. With masks and no directory, katzip searches the current
-directory. Masks use POSIX `fnmatch` rules on the supported POSIX systems.
-The `@` prefix normally lets a shell pass a mask without quotes. An explicit
-file argument adds that file only. Symbolic links found during traversal are
-skipped.
+`@nested/*.txt`. Without `-r`, masks search the current directory only. A mask
+without `/` matches file names at any visited depth; a mask with `/` matches
+paths relative to each named directory. Files matching any mask are included.
+Masks use POSIX `fnmatch` rules on the supported POSIX systems.
+The `@` prefix normally lets a shell pass a mask without quotes. The default
+`@*` follows POSIX glob rules and skips names beginning with a dot. An explicit
+file argument adds only that file; with `-r` and masks, explicit files are also
+filtered by those masks. Symbolic links found during traversal are skipped.
 
-While compressing, katzip shows each file name and one increasing percentage
-with two decimal places on standard error. It refreshes once per second.
-At levels 1-6, the indicator follows completed files or input chunks; libdeflate
-does not report progress inside a buffer. Turtledeflate may revisit the same input block many times and cannot know in
-advance how many passes it will need. The percentage within a block is an
-estimate based on work already done; it reaches the exact block boundary when
-that block finishes. At level 9, the percentage follows Turtledeflate while
-ECT runs in parallel; it reaches 100% after both candidates finish.
+While compressing, katzip shows each file name and one increasing progress
+percentage with two decimal places on standard error. It refreshes once per
+second and stays below 100%. When a file is complete, the final line shows
+`100 * compressed_size / original_size` instead. The percentage is 0.00% for
+an empty input because the ratio is undefined. Stored files show 100.00%.
+At levels 1-6, the progress indicator follows completed input chunks; libdeflate
+does not report progress inside a buffer. Turtledeflate may revisit the same
+input block many times and cannot know in advance how many passes it will need.
+The percentage within a block is an estimate based on work already done; it
+reaches the exact block boundary when that block finishes. At level 9, progress
+follows Turtledeflate while ECT runs in parallel; the final ratio appears after
+both candidates finish.
 
 katzip writes to a temporary file and replaces an existing output only after
 the new archive is complete. It returns a nonzero exit status on

@@ -36,6 +36,50 @@ class KatzipTests(unittest.TestCase):
             self.assertTrue(info.flag_bits & 0x0800)
             self.assertEqual(len(archive) - info.compress_size, 98 + 2 * len(name.encode()))
 
+    def test_help_text_and_optional_inputs(self):
+        expected = (
+            "KATZip v1.1 - Deflating with extreme devotion.\n"
+            "Dedicated to the memory of Phil Katz (1962-2000), the father of ZIP.\n"
+            "\n"
+            "Usage:   katzip [-1..-9] [-r] <archive.zip> [[@]input_files...]\n"
+            "Example: katzip APPNOTE APPNOTE.TXT\n"
+        )
+        result = self.run_katzip("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.decode(), expected)
+        self.assertEqual(result.stderr, b"")
+        result = self.run_katzip()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.decode(), expected)
+
+    def test_no_inputs_uses_star_mask_at_selected_depth(self):
+        (self.root / "top.txt").write_text("top")
+        (self.root / ".hidden").write_text("hidden")
+        (self.root / "nested").mkdir()
+        (self.root / "nested" / "deep.txt").write_text("deep")
+        (self.root / "flat.zip").write_bytes(b"old archive")
+        result = self.run_katzip("-1", "flat")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "flat.zip") as opened:
+            self.assertEqual(opened.namelist(), ["top.txt"])
+        (self.root / "flat.zip").unlink()
+        result = self.run_katzip("-r", "-1", "deep")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "deep.zip") as opened:
+            self.assertEqual(set(opened.namelist()), {"top.txt", "nested/deep.txt"})
+
+    def test_final_percentage_is_compressed_size_ratio(self):
+        data = b"compressible text " * 1000
+        (self.root / "text.txt").write_bytes(data)
+        result = self.run_katzip("-1", "archive", "text.txt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            info = opened.getinfo("text.txt")
+            ratio = 100 * info.compress_size / info.file_size
+        lines = result.stderr.decode().replace("\r", "\n").splitlines()
+        self.assertEqual(lines[-1], f"text.txt {ratio:.2f}%")
+        self.assertNotIn("100.00%", result.stderr.decode())
+
     def test_existing_archive_survives_write_error(self):
         old = self.root / "archive.zip"
         old.write_bytes(b"previous archive")
@@ -87,6 +131,9 @@ class KatzipTests(unittest.TestCase):
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
             self.assertEqual(opened.read("pattern.bin"), content)
             self.assertIsNone(opened.testzip())
+            ratio = 100 * opened.getinfo("pattern.bin").compress_size / len(content)
+        lines = result.stderr.decode().replace("\r", "\n").splitlines()
+        self.assertEqual(lines[-1].rstrip(), f"pattern.bin {ratio:.2f}%")
 
     def test_fast_levels_and_store_fallback(self):
         content = b"A short repeated sentence.\n" * 1000

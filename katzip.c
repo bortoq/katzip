@@ -207,11 +207,9 @@ static void show_progress(PROGRESS *progress, int timer_tick)
     double work = progress->pass - 1 + (double)progress->pass_done / progress->pass_total;
     done += progress->block_size * work / (work + progress->pass_scale);
   }
-  percent = entry->expected_size ? done * 10000 / entry->expected_size : 10000;
-  if(progress->block_size && percent > 9999)
+  percent = entry->expected_size ? done * 10000 / entry->expected_size : 0;
+  if(percent > 9999)
     percent = 9999;
-  if(percent > 10000)
-    percent = 10000;
   if((uint64_t)percent < progress->displayed_percent)
     percent = progress->displayed_percent;
   if(timer_tick && progress->block_size &&
@@ -321,12 +319,23 @@ static void progress_callback(void *user, uint32_t pass, uint32_t completed, uin
 
 static void progress_finish(PROGRESS *progress, int success)
 {
+  uint64_t percent;
+  int width;
+  int i;
   pthread_mutex_lock(&progress->mutex);
-  if(success)
-    progress->done = progress->entry->expected_size;
   progress->block_size = 0;
   progress->pass = 0;
-  show_progress(progress, 0);
+  if(success)
+  {
+    percent = progress->entry->size ?
+      (progress->entry->compressed_size * 10000 + progress->entry->size / 2) / progress->entry->size : 0;
+    width = fprintf(stderr, "\r%s %llu.%02llu%%", progress->entry->name,
+      (unsigned long long)(percent / 100), (unsigned long long)(percent % 100));
+    for(i = width; i < progress->display_width; ++i)
+      fputc(' ', stderr);
+  }
+  else
+    show_progress(progress, 0);
   fputc('\n', stderr);
   progress->active = 0;
   pthread_cond_signal(&progress->condition);
@@ -942,7 +951,7 @@ static int matches_masks(const char **masks, size_t count, const char *relative,
   return 0;
 }
 
-static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char **masks, size_t mask_count)
+static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char **masks, size_t mask_count, int recursive)
 {
   DIR *stream = opendir(directory);
   struct dirent *item;
@@ -978,8 +987,8 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
       fprintf(stderr, "katzip: cannot inspect %s: %s\n", path, strerror(errno));
       status = -1;
     }
-    else if(S_ISDIR(file_stat.st_mode))
-      status = walk_directory(list, path, root, masks, mask_count);
+    else if(S_ISDIR(file_stat.st_mode) && recursive)
+      status = walk_directory(list, path, root, masks, mask_count, recursive);
     else if(S_ISREG(file_stat.st_mode))
     {
       relative = strcmp(root, ".") == 0 ? path : path + strlen(root) + 1;
@@ -1020,7 +1029,7 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive, c
     prefix = strlen(root);
     while(prefix > 1 && root[prefix - 1] == '/')
       root[--prefix] = 0;
-    status = walk_directory(list, root, root, masks, mask_count);
+    status = walk_directory(list, root, root, masks, mask_count, 1);
     free(root);
     return status;
   }
@@ -1045,6 +1054,15 @@ static void free_entries(ENTRY_LIST *list)
     free((void*)list->entries[i].name);
   }
   free(list->entries);
+}
+
+static void print_help(FILE *stream)
+{
+  fputs("KATZip v1.1 - Deflating with extreme devotion.\n"
+    "Dedicated to the memory of Phil Katz (1962-2000), the father of ZIP.\n"
+    "\n"
+    "Usage:   katzip [-1..-9] [-r] <archive.zip> [[@]input_files...]\n"
+    "Example: katzip APPNOTE APPNOTE.TXT\n", stream);
 }
 
 int main(int argc, char **argv)
@@ -1076,6 +1094,11 @@ int main(int argc, char **argv)
 
   while(archive_arg < argc && argv[archive_arg][0] == '-')
   {
+    if(strcmp(argv[archive_arg], "--help") == 0 || strcmp(argv[archive_arg], "-h") == 0)
+    {
+      print_help(stdout);
+      return 0;
+    }
     if(strcmp(argv[archive_arg], "--") == 0)
     {
       ++archive_arg;
@@ -1094,7 +1117,7 @@ int main(int argc, char **argv)
   }
   if(argc <= archive_arg)
   {
-    fprintf(stderr, "usage: katzip [-1..-9] [-r] archive_name file[s] [@MASK ...]\n");
+    print_help(stderr);
     return 1;
   }
   if(load_config(argv[0], level, &config, &fast_level))
@@ -1118,7 +1141,7 @@ int main(int argc, char **argv)
   }
   for(i = archive_arg + 1; i < argc; ++i)
   {
-    if(recursive && argv[i][0] == '@')
+    if(argv[i][0] == '@')
     {
       if(!argv[i][1])
       {
@@ -1130,19 +1153,16 @@ int main(int argc, char **argv)
     else
       ++source_count;
   }
-  if(!source_count && !mask_count)
-  {
-    fprintf(stderr, "katzip: no input files or masks\n");
-    goto done;
-  }
   if(!source_count)
   {
-    if(add_argument(&list, ".", recursive, masks, mask_count))
+    if(!mask_count)
+      masks[mask_count++] = "*";
+    if(walk_directory(&list, ".", ".", masks, mask_count, recursive))
       goto done;
   }
   for(i = archive_arg + 1; i < argc; ++i)
   {
-    if(recursive && argv[i][0] == '@')
+    if(argv[i][0] == '@')
       continue;
     if(add_argument(&list, argv[i], recursive, masks, mask_count))
       goto done;
