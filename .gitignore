@@ -1,3 +1,4 @@
 /katzip
 __pycache__/
 *.pyc
+/katzip.ini

@@ -18,6 +18,7 @@
 #include <libdeflate.h>
 #include <zlib.h>
 
+#include "config_defaults.h"
 #include "turtledeflate_api.h"
 #include "mz.h"
 #include "mz_strm.h"
@@ -374,29 +375,105 @@ static char *trim(char *text)
   return text;
 }
 
-static char *config_path(const char *program)
+/* locate the installed executable even when the shell found it through PATH */
+static char *executable_config_path(const char *program)
 {
-  const char *override = getenv("KATZIP_INI");
+  const char *search;
+  const char *end;
   const char *slash;
-  const char *name = "katzip.ini";
+  char *executable = realpath("/proc/self/exe", NULL);
+  char *candidate;
   char *path;
-  size_t prefix;
-  if(override && *override)
+  size_t length;
+  if(!executable && strchr(program, '/'))
+    executable = realpath(program, NULL);
+  search = getenv("PATH");
+  while(!executable && !strchr(program, '/') && search)
   {
-    path = malloc(strlen(override) + 1);
-    if(path)
-      strcpy(path, override);
-    return path;
+    end = strchr(search, ':');
+    length = end ? (size_t)(end - search) : strlen(search);
+    candidate = malloc(length + strlen(program) + 3);
+    if(!candidate)
+      return NULL;
+    if(length)
+      memcpy(candidate, search, length);
+    else
+      candidate[0] = '.';
+    candidate[length ? length : 1] = '/';
+    strcpy(candidate + (length ? length : 1) + 1, program);
+    if(access(candidate, X_OK) == 0)
+      executable = realpath(candidate, NULL);
+    free(candidate);
+    search = end ? end + 1 : NULL;
   }
-  slash = strrchr(program, '/');
-  prefix = slash ? (size_t)(slash - program + 1) : 0;
-  path = malloc(prefix + strlen(name) + 1);
+  if(!executable)
+    return NULL;
+  slash = strrchr(executable, '/');
+  length = slash ? (size_t)(slash - executable + 1) : 0;
+  path = malloc(length + sizeof("katzip.ini"));
   if(path)
   {
-    memcpy(path, program, prefix);
-    strcpy(path + prefix, name);
+    memcpy(path, executable, length);
+    strcpy(path + length, "katzip.ini");
   }
+  free(executable);
   return path;
+}
+
+/* an explicit override is strict; only absent files in the default locations fall back */
+static int open_config(const char *program, FILE **file, char **path)
+{
+  const char *override = getenv("KATZIP_INI");
+  int error_number;
+  if(override && *override)
+  {
+    *path = strdup(override);
+    if(!*path)
+      goto out_of_memory;
+    *file = fopen(*path, "r");
+    if(*file)
+      return 0;
+    goto open_error;
+  }
+  *path = strdup("katzip.ini");
+  if(!*path)
+    goto out_of_memory;
+  *file = fopen(*path, "r");
+  if(*file)
+    return 0;
+  error_number = errno;
+  if(error_number != ENOENT && error_number != ENOTDIR)
+    goto open_error;
+  free(*path);
+  *path = executable_config_path(program);
+  if(*path)
+  {
+    *file = fopen(*path, "r");
+    if(*file)
+      return 0;
+    error_number = errno;
+    if(error_number != ENOENT && error_number != ENOTDIR)
+      goto open_error;
+    free(*path);
+  }
+  *path = strdup("built-in settings");
+  if(!*path)
+    goto out_of_memory;
+  *file = fmemopen((void*)katzip_default_ini, sizeof(katzip_default_ini) - 1, "r");
+  if(!*file)
+  {
+    fprintf(stderr, "katzip: cannot read built-in settings: %s\n", strerror(errno));
+    return -1;
+  }
+  fprintf(stderr, "katzip: warning: katzip.ini not found in current or executable directory; using built-in compression settings\n");
+  return 0;
+
+open_error:
+  fprintf(stderr, "katzip: cannot open %s: %s\n", *path, strerror(errno));
+  return -1;
+out_of_memory:
+  fprintf(stderr, "katzip: out of memory\n");
+  return -1;
 }
 
 static int valid_config(const turtledeflate_config_t *config, int level)
@@ -443,7 +520,7 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
   };
   char section[32];
   char line[256];
-  char *path = config_path(program);
+  char *path = NULL;
   char *key;
   char *value;
   char *end;
@@ -455,15 +532,8 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
   int found = 0;
   int line_number = 0;
   int status = -1;
-  if(!path)
+  if(open_config(program, &file, &path))
   {
-    fprintf(stderr, "katzip: out of memory\n");
-    return -1;
-  }
-  file = fopen(path, "r");
-  if(!file)
-  {
-    fprintf(stderr, "katzip: cannot open %s: %s\n", path, strerror(errno));
     free(path);
     return -1;
   }
@@ -1122,6 +1192,15 @@ int main(int argc, char **argv)
 
   while(archive_arg < argc && argv[archive_arg][0] == '-')
   {
+    if(strcmp(argv[archive_arg], "--print-default-ini") == 0)
+    {
+      if(fputs(katzip_default_ini, stdout) == EOF || fflush(stdout) == EOF)
+      {
+        fprintf(stderr, "katzip: cannot write default settings\n");
+        return 1;
+      }
+      return 0;
+    }
     if(strcmp(argv[archive_arg], "--help") == 0 || strcmp(argv[archive_arg], "-h") == 0)
     {
       print_help(stdout);

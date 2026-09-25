@@ -14,8 +14,8 @@ Run `make`. This creates `./katzip`. You need C and C++ compilers, `make`,
 (for example, `zlib1g-dev` and `libdeflate-dev` on Debian).
 The build copies Turtledeflate into a temporary directory, applies
 `patches/turtledeflate.patch` there, then removes the directory. The original
-files in `third_party/turtledeflate` stay untouched. Keep `katzip.ini` next to
-the executable.
+files in `third_party/turtledeflate` stay untouched. Run `make ini` to generate
+an editable `katzip.ini` from the built-in defaults.
 Run `make test` to build and run the archive integration tests.
 
 ## Use
@@ -50,13 +50,17 @@ For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
 the key and the compressor name are not stored in the archive. Stored entries
 leave the DEFLATE hint bits clear.
 
-Compression levels come from `katzip.ini`: `[libdeflate-1]` through
-`[libdeflate-6]` select libdeflate levels, and `[turtledeflate-7]` through
-`[turtledeflate-9]` contain Turtledeflate settings. You can edit the values before
-running katzip. If you call the program without a path, it looks for the INI file
-in the current directory. Set `KATZIP_INI` to use a file at another path.
-katzip stops with an error if the selected section or a required setting is
-missing or invalid.
+The default compression levels are compiled into katzip from
+`config_defaults.h`. Levels `[libdeflate-1]` through `[libdeflate-6]` select
+libdeflate levels; `[turtledeflate-7]` through `[turtledeflate-9]` contain
+Turtledeflate settings. Run `make ini` to write an editable `katzip.ini` from
+these defaults. The generated file is ignored by Git; running `make ini` again
+replaces it. katzip first checks for `katzip.ini` in the current directory,
+then next to the executable, including when launched through `PATH`. If neither
+exists, it warns once and uses the built-in settings for every compression
+level. Set `KATZIP_INI` to explicitly use another file; a missing or invalid
+explicit file is an error. A found INI with a missing or invalid selected
+section is also an error.
 The maximum block size is 1,000,000 bytes; unsafe INI values are rejected
 before creating an archive.
 

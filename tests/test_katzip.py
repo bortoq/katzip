@@ -1,6 +1,7 @@
 import os
 import pathlib
 import resource
+import shutil
 import signal
 import struct
 import subprocess
@@ -11,7 +12,6 @@ import zipfile
 
 
 PROGRAM = pathlib.Path(__file__).resolve().parents[1] / "katzip"
-CONFIG = pathlib.Path(__file__).resolve().parents[1] / "katzip.ini"
 
 
 class KatzipTests(unittest.TestCase):
@@ -217,15 +217,67 @@ class KatzipTests(unittest.TestCase):
         (self.root / "input.txt").write_text("test")
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
+        defaults = subprocess.run(
+            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
+        ).stdout.decode()
         for key, replacement in (
             ("i_maximum_block_size = 1000000", "i_maximum_block_size = 1000001"),
             ("i_min_start_fp = -6", "i_min_start_fp = -2147483648"),
         ):
-            config.write_text(CONFIG.read_text().replace(key, replacement))
+            config.write_text(defaults.replace(key, replacement))
             result = self.run_katzip("-9", "archive", "input.txt", env=environment)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid settings", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
+
+    def test_ini_search_order_and_embedded_levels(self):
+        binary_dir = self.root / "bin"
+        document_dir = self.root / "documents"
+        binary_dir.mkdir()
+        document_dir.mkdir()
+        shutil.copy2(PROGRAM, binary_dir / "katzip")
+        (document_dir / "input.txt").write_text("Repeated input. " * 100)
+        defaults = subprocess.run(
+            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
+        ).stdout.decode()
+        executable_ini = binary_dir / "katzip.ini"
+        current_ini = document_dir / "katzip.ini"
+        executable_ini.write_text(defaults)
+        current_ini.write_text(defaults.replace("level = 1", "level = 13", 1))
+        environment = dict(os.environ)
+        environment.pop("KATZIP_INI", None)
+        environment["PATH"] = str(binary_dir) + os.pathsep + environment.get("PATH", "")
+
+        def run(level):
+            return subprocess.run(
+                ["katzip", f"-{level}", "archive", "input.txt"],
+                cwd=document_dir, env=environment, capture_output=True
+            )
+
+        result = run(1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"invalid setting in katzip.ini", result.stderr)
+        self.assertFalse((document_dir / "archive.zip").exists())
+
+        current_ini.unlink()
+        result = run(1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(b"warning", result.stderr)
+        with zipfile.ZipFile(document_dir / "archive.zip") as archive:
+            self.assertEqual(archive.read("input.txt"), (document_dir / "input.txt").read_bytes())
+
+        executable_ini.unlink()
+        for level in range(1, 10):
+            result = run(level)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"using built-in compression settings", result.stderr)
+            with zipfile.ZipFile(document_dir / "archive.zip") as archive:
+                self.assertEqual(archive.read("input.txt"), (document_dir / "input.txt").read_bytes())
+
+        environment["KATZIP_INI"] = str(executable_ini)
+        result = run(1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"cannot open", result.stderr)
 
     def test_recursive_masks_select_files_in_subdirectories(self):
         (self.root / "src" / "nested").mkdir(parents=True)
