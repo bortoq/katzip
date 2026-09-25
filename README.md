@@ -21,7 +21,11 @@ smaller archive.
 
 The output path is used exactly as given, so add
 `.zip` yourself if you want that extension. Each later argument is a file to
-add. The file keeps its relative path inside the archive.
+add. The file keeps its relative path inside the archive. UTF-8 file names are
+marked as UTF-8 in the ZIP headers.
+
+While compressing, turzip shows each file name, a progress bar, and the percent
+of that file processed on standard error.
 
 turzip replaces an existing output file. It returns a nonzero exit status on
 error. It does not accept directories, absolute input paths, duplicate entry
