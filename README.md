@@ -11,9 +11,15 @@ Run `make`. This creates `./turzip`. You need a C compiler and `make`.
 
 ```sh
 ./turzip archive.zip file1.txt folder/file2.txt
+./turzip -9 archive.zip file1.txt folder/file2.txt
 ```
 
-The first argument is the output path. turzip uses it exactly as given, so add
+An optional `-1` to `-9` flag sets the compression level before the output path.
+Level 1 uses the least compression work, and level 9 uses the most. The default
+is level 7. A higher level can take much longer and does not always make a
+smaller archive.
+
+The output path is used exactly as given, so add
 `.zip` yourself if you want that extension. Each later argument is a file to
 add. The file keeps its relative path inside the archive.
 

@@ -28,6 +28,16 @@ typedef struct {
   uint64_t offset;
 } OUTPUT;
 
+typedef struct {
+  int subblocks;
+  int split_iterations;
+  int internal_iterations;
+  int points;
+  int starts;
+  int min_fp;
+  int max_fp;
+} PRESET;
+
 static int write_bytes(OUTPUT *out, const void *data, size_t size)
 {
   if(out->offset + size > UINT32_MAX || fwrite(data, 1, size, out->file) != size)
@@ -144,29 +154,41 @@ static int write_end(OUTPUT *out, uint16_t count, uint32_t central_offset, uint3
     write_u16(out, 0) ? -1 : 0;
 }
 
-static turtledeflate_config_t compression_config(void)
+static turtledeflate_config_t compression_config(int level)
 {
+  static const PRESET presets[9] = {
+    {1, 1, 1, 3, 2, -3, 1},
+    {2, 1, 1, 3, 2, -3, 1},
+    {2, 1, 2, 5, 2, -3, 1},
+    {4, 1, 2, 5, 3, -3, 1},
+    {4, 2, 3, 7, 3, -3, 1},
+    {8, 2, 3, 7, 3, -3, 1},
+    {8, 2, 4, 7, 3, -3, 1},
+    {16, 4, 10, 15, 6, -4, 3},
+    {32, 8, 24, 31, 10, -6, 5}
+  };
+  const PRESET *preset = &presets[level - 1];
   turtledeflate_config_t config;
   memset(&config, 0, sizeof(config));
-  config.i_compression_level = 7;
+  config.i_compression_level = level;
   config.i_maximum_block_size = BLOCK_SIZE;
-  config.i_maximum_subblocks = 8;
-  config.i_max_block_splitter_iterations = 2;
-  config.i_max_internal_block_splitter_iterations = 4;
-  config.i_block_splitter_num_points = 7;
-  config.i_block_splitter_center_dist = 2;
+  config.i_maximum_subblocks = preset->subblocks;
+  config.i_max_block_splitter_iterations = preset->split_iterations;
+  config.i_max_internal_block_splitter_iterations = preset->internal_iterations;
+  config.i_block_splitter_num_points = preset->points;
+  config.i_block_splitter_center_dist = preset->points / 4 + 1;
   config.i_block_splitter_min_range_for_points = 1024;
-  config.i_min_start_fp = -3;
-  config.i_max_start_fp = 1;
-  config.i_num_start_fp = 3;
+  config.i_min_start_fp = preset->min_fp;
+  config.i_max_start_fp = preset->max_fp;
+  config.i_num_start_fp = preset->starts;
   return config;
 }
 
-static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in)
+static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, int level)
 {
   unsigned char buffer[BLOCK_SIZE];
   unsigned char *compressed;
-  turtledeflate_config_t config = compression_config();
+  turtledeflate_config_t config = compression_config(level);
   void *compressor = NULL;
   uint64_t start;
   uint32_t crc = UINT32_MAX;
@@ -231,22 +253,36 @@ int main(int argc, char **argv)
   FILE *in;
   uint32_t central_offset;
   uint32_t central_size;
+  int archive_arg = 1;
+  int file_arg;
+  int level = 7;
   int i;
   int j;
   int status = 1;
 
-  if(argc < 3 || argc - 2 > UINT16_MAX)
+  if(argc > 1 && argv[1][0] == '-')
   {
-    fprintf(stderr, "usage: turzip archive_name file[s]\n");
+    if(argv[1][1] < '1' || argv[1][1] > '9' || argv[1][2])
+    {
+      fprintf(stderr, "turzip: invalid compression level: %s\n", argv[1]);
+      return 1;
+    }
+    level = argv[1][1] - '0';
+    archive_arg = 2;
+  }
+  file_arg = archive_arg + 1;
+  if(argc <= file_arg || argc - file_arg > UINT16_MAX)
+  {
+    fprintf(stderr, "usage: turzip [-1..-9] archive_name file[s]\n");
     return 1;
   }
-  entries = calloc((size_t)(argc - 2), sizeof(*entries));
+  entries = calloc((size_t)(argc - file_arg), sizeof(*entries));
   if(!entries)
   {
     fprintf(stderr, "turzip: out of memory\n");
     return 1;
   }
-  for(i = 2; i < argc; ++i)
+  for(i = file_arg; i < argc; ++i)
   {
     const char *name = argv[i];
     while(name[0] == '.' && name[1] == '/')
@@ -258,37 +294,37 @@ int main(int argc, char **argv)
       fprintf(stderr, "turzip: invalid input file: %s\n", argv[i]);
       goto done;
     }
-    for(j = 2; j < i; ++j)
+    for(j = file_arg; j < i; ++j)
     {
-      if(strcmp(name, entries[j - 2].name) == 0)
+      if(strcmp(name, entries[j - file_arg].name) == 0)
       {
         fprintf(stderr, "turzip: duplicate entry: %s\n", name);
         goto done;
       }
     }
-    if(!stat(argv[1], &archive_stat) && archive_stat.st_dev == file_stat.st_dev &&
+    if(!stat(argv[archive_arg], &archive_stat) && archive_stat.st_dev == file_stat.st_dev &&
       archive_stat.st_ino == file_stat.st_ino)
     {
       fprintf(stderr, "turzip: archive is an input file: %s\n", argv[i]);
       goto done;
     }
-    entries[i - 2].path = argv[i];
-    entries[i - 2].name = name;
-    entries[i - 2].name_len = (uint16_t)strlen(name);
-    entries[i - 2].mode = (uint32_t)file_stat.st_mode;
-    set_dos_time(&entries[i - 2], file_stat.st_mtime);
+    entries[i - file_arg].path = argv[i];
+    entries[i - file_arg].name = name;
+    entries[i - file_arg].name_len = (uint16_t)strlen(name);
+    entries[i - file_arg].mode = (uint32_t)file_stat.st_mode;
+    set_dos_time(&entries[i - file_arg], file_stat.st_mtime);
   }
-  out.file = fopen(argv[1], "wb");
+  out.file = fopen(argv[archive_arg], "wb");
   if(!out.file)
   {
-    fprintf(stderr, "turzip: cannot create %s: %s\n", argv[1], strerror(errno));
+    fprintf(stderr, "turzip: cannot create %s: %s\n", argv[archive_arg], strerror(errno));
     goto done;
   }
   out.offset = 0;
-  for(i = 0; i < argc - 2; ++i)
+  for(i = 0; i < argc - file_arg; ++i)
   {
     in = fopen(entries[i].path, "rb");
-    if(!in || write_entry(&out, &entries[i], in))
+    if(!in || write_entry(&out, &entries[i], in, level))
     {
       fprintf(stderr, "turzip: cannot archive %s\n", entries[i].path);
       if(in)
@@ -299,26 +335,26 @@ int main(int argc, char **argv)
       goto output_error;
   }
   central_offset = (uint32_t)out.offset;
-  for(i = 0; i < argc - 2; ++i)
+  for(i = 0; i < argc - file_arg; ++i)
   {
     if(write_central_header(&out, &entries[i]))
       goto output_error;
   }
   central_size = (uint32_t)out.offset - central_offset;
-  if(write_end(&out, (uint16_t)(argc - 2), central_offset, central_size))
+  if(write_end(&out, (uint16_t)(argc - file_arg), central_offset, central_size))
     goto output_error;
   if(fclose(out.file))
   {
-    remove(argv[1]);
+    remove(argv[archive_arg]);
     goto done;
   }
   status = 0;
   goto done;
 
 output_error:
-  fprintf(stderr, "turzip: failed to write archive %s\n", argv[1]);
+  fprintf(stderr, "turzip: failed to write archive %s\n", argv[archive_arg]);
   fclose(out.file);
-  remove(argv[1]);
+  remove(argv[archive_arg]);
 done:
   free(entries);
   return status;
