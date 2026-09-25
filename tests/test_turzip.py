@@ -88,6 +88,35 @@ class TurzipTests(unittest.TestCase):
             self.assertEqual(opened.read("pattern.bin"), content)
             self.assertIsNone(opened.testzip())
 
+    def test_fast_levels_and_store_fallback(self):
+        content = b"A short repeated sentence.\n" * 1000
+        (self.root / "text.txt").write_bytes(content)
+        (self.root / "random.bin").write_bytes(os.urandom(65536))
+        for level in range(1, 7):
+            result = self.run_turzip(f"-{level}", "archive", "text.txt", "random.bin")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with zipfile.ZipFile(self.root / "archive.zip") as opened:
+                self.assertEqual(opened.read("text.txt"), content)
+                self.assertEqual(opened.getinfo("text.txt").compress_type, zipfile.ZIP_DEFLATED)
+                self.assertEqual(opened.read("random.bin"), (self.root / "random.bin").read_bytes())
+                self.assertEqual(opened.getinfo("random.bin").compress_type, zipfile.ZIP_STORED)
+
+    def test_large_fast_file_uses_bounded_memory_path(self):
+        large = self.root / "large.bin"
+        with large.open("wb") as output:
+            output.truncate(65 * 1024 * 1024)
+        result = self.run_turzip("-1", "archive", "large.bin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            info = opened.getinfo("large.bin")
+            self.assertEqual(info.file_size, large.stat().st_size)
+            self.assertEqual((self.root / "archive.zip").stat().st_size - info.compress_size,
+                             98 + 2 * len("large.bin"))
+            with opened.open("large.bin") as data:
+                while data.read(1024 * 1024):
+                    pass
+            self.assertIsNone(opened.testzip())
+
     def test_unsafe_config_is_rejected(self):
         (self.root / "input.txt").write_text("test")
         config = self.root / "custom.ini"

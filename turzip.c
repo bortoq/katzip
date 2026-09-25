@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <libdeflate.h>
+#include <zlib.h>
 
 #include "turtledeflate_api.h"
 #include "mz.h"
@@ -79,18 +81,11 @@ typedef struct {
 #define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
 /* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
 #define MAX_BLOCK_SIZE 1000000
+#define FAST_FILE_LIMIT (64U * 1024U * 1024U)
 
 static uint32_t update_crc(uint32_t crc, const unsigned char *data, size_t size)
 {
-  size_t i;
-  int bit;
-  for(i = 0; i < size; ++i)
-  {
-    crc ^= data[i];
-    for(bit = 0; bit < 8; ++bit)
-      crc = (crc >> 1) ^ (crc & 1 ? UINT32_C(0xedb88320) : 0);
-  }
-  return crc;
+  return (uint32_t)crc32(crc ^ UINT32_MAX, data, (uInt)size) ^ UINT32_MAX;
 }
 
 static void *ect_worker(void *argument)
@@ -278,7 +273,7 @@ static void progress_start(PROGRESS *progress, const ENTRY *entry, const turtled
   progress->entry = entry;
   progress->done = 0;
   progress->block_size = 0;
-  progress->pass_scale = 2.0 * config->i_num_start_fp * config->i_max_block_splitter_iterations;
+  progress->pass_scale = config ? 2.0 * config->i_num_start_fp * config->i_max_block_splitter_iterations : 1.0;
   progress->pass = 0;
   progress->pass_done = 0;
   progress->pass_total = 0;
@@ -410,7 +405,7 @@ static int valid_config(const turtledeflate_config_t *config, int level)
     config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
 }
 
-static int load_config(const char *program, int level, turtledeflate_config_t *config)
+static int load_config(const char *program, int level, turtledeflate_config_t *config, int *fast_level)
 {
   static const CONFIG_FIELD fields[] = {
     {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
@@ -453,8 +448,9 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
     free(path);
     return -1;
   }
-  snprintf(section, sizeof(section), "[turtledeflate-%d]", level);
+  snprintf(section, sizeof(section), level < 7 ? "[libdeflate-%d]" : "[turtledeflate-%d]", level);
   memset(config, 0, sizeof(*config));
+  *fast_level = 0;
   while(fgets(line, sizeof(line), file))
   {
     ++line_number;
@@ -482,6 +478,14 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
     number = strtol(value, &end, 10);
     if(!*value || *end || errno == ERANGE || number < INT32_MIN || number > INT32_MAX)
       goto bad_line;
+    if(level < 7)
+    {
+      if(strcmp(key, "level") || seen || number < 1 || number > 12)
+        goto bad_line;
+      *fast_level = (int)number;
+      seen = 1;
+      continue;
+    }
     for(i = 0; i < ARRAY_N(fields); ++i)
     {
       if(strcmp(key, fields[i].name) == 0)
@@ -504,7 +508,8 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
     fprintf(stderr, "turzip: cannot read %s\n", path);
     goto done;
   }
-  if(!found || seen != (UINT32_C(1) << ARRAY_N(fields)) - 1 || !valid_config(config, level))
+  if(!found || (level < 7 ? (seen != 1 || !*fast_level) :
+    (seen != (UINT32_C(1) << ARRAY_N(fields)) - 1 || !valid_config(config, level))))
   {
     fprintf(stderr, "turzip: missing or invalid settings in %s %s\n", path, section);
     goto done;
@@ -525,6 +530,143 @@ static int write_deflate_chunk(void *zip, FILE *temporary, const unsigned char *
   if(temporary)
     return fwrite(data, 1, (size_t)size, temporary) == (size_t)size ? 0 : -1;
   return mz_zip_entry_write(zip, data, size) == size ? 0 : -1;
+}
+
+/* libdeflate compresses a complete buffer; large files use streaming zlib. */
+static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, PROGRESS *progress)
+{
+  mz_zip_file file_info;
+  struct libdeflate_compressor *compressor = NULL;
+  unsigned char *input = NULL;
+  unsigned char *output = NULL;
+  z_stream stream;
+  uint32_t crc = UINT32_MAX;
+  size_t size;
+  size_t output_size = 0;
+  size_t offset;
+  int method = MZ_COMPRESS_METHOD_DEFLATE;
+  int started = 0;
+  int status = -1;
+  int result;
+
+  memset(&file_info, 0, sizeof(file_info));
+  file_info.version_madeby = (3 << 8) | 20;
+  file_info.version_needed = 20;
+  file_info.flag = entry->flags;
+  file_info.uncompressed_size = entry->expected_size;
+  file_info.zip64 = MZ_ZIP64_DISABLE;
+  file_info.modified_date = entry->mtime;
+  file_info.filename = entry->name;
+  file_info.filename_size = entry->name_len;
+  file_info.external_fa = entry->mode << 16;
+  progress_start(progress, entry, NULL);
+  started = 1;
+
+  if(entry->expected_size <= FAST_FILE_LIMIT)
+  {
+    size = entry->expected_size;
+    input = malloc(size ? size : 1);
+    if(!input || fread(input, 1, size, in) != size || fgetc(in) != EOF || ferror(in))
+      goto done;
+    entry->size = (uint32_t)size;
+    crc = update_crc(crc, input, size);
+    progress_block(progress, (uint32_t)size);
+    compressor = libdeflate_alloc_compressor(level);
+    if(!compressor)
+      goto done;
+    /* A result that does not save space is written as ZIP Store. */
+    output = malloc(size + 16);
+    if(!output)
+      goto done;
+    if(size)
+      output_size = libdeflate_deflate_compress(compressor, input, size, output, size + 16);
+    else
+    {
+      output[0] = 0x03;
+      output[1] = 0x00;
+      output_size = 2;
+    }
+    if(size && (!output_size || output_size >= size))
+      method = MZ_COMPRESS_METHOD_STORE;
+    file_info.compression_method = method;
+    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+      goto done;
+    for(offset = 0; offset < (method == MZ_COMPRESS_METHOD_STORE ? size : output_size);)
+    {
+      size_t left = (method == MZ_COMPRESS_METHOD_STORE ? size : output_size) - offset;
+      size_t chunk = left > 1048576 ? 1048576 : left;
+      const unsigned char *data = method == MZ_COMPRESS_METHOD_STORE ? input : output;
+      if(mz_zip_entry_write(zip, data + offset, (int32_t)chunk) != (int32_t)chunk)
+        goto done;
+      offset += chunk;
+    }
+    entry->compressed_size = method == MZ_COMPRESS_METHOD_STORE ? size : output_size;
+    progress_update(progress, entry->size);
+  }
+  else
+  {
+    input = malloc(1048576);
+    output = malloc(1048576);
+    if(!input || !output)
+      goto done;
+    memset(&stream, 0, sizeof(stream));
+    if(deflateInit2(&stream, level > 9 ? 9 : level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+      goto done;
+    file_info.compression_method = MZ_COMPRESS_METHOD_DEFLATE;
+    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+    {
+      deflateEnd(&stream);
+      goto done;
+    }
+    do
+    {
+      size = fread(input, 1, 1048576, in);
+      if(ferror(in) || (uint64_t)entry->size + size > entry->expected_size)
+      {
+        deflateEnd(&stream);
+        goto done;
+      }
+      crc = update_crc(crc, input, size);
+      entry->size += (uint32_t)size;
+      progress_block(progress, (uint32_t)size);
+      stream.next_in = input;
+      stream.avail_in = (uInt)size;
+      do
+      {
+        stream.next_out = output;
+        stream.avail_out = 1048576;
+        result = deflate(&stream, size ? Z_NO_FLUSH : Z_FINISH);
+        if(result != Z_OK && result != Z_STREAM_END)
+        {
+          deflateEnd(&stream);
+          goto done;
+        }
+        output_size = 1048576 - stream.avail_out;
+        if(output_size && mz_zip_entry_write(zip, output, (int32_t)output_size) != (int32_t)output_size)
+        {
+          deflateEnd(&stream);
+          goto done;
+        }
+        entry->compressed_size += output_size;
+      } while(stream.avail_in || stream.avail_out == 0 || (!size && result != Z_STREAM_END));
+      progress_update(progress, entry->size);
+    } while(size);
+    deflateEnd(&stream);
+    if(entry->size != entry->expected_size)
+      goto done;
+  }
+  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, entry->compressed_size, entry->size) != MZ_OK)
+    goto done;
+  status = 0;
+
+done:
+  if(compressor)
+    libdeflate_free_compressor(compressor);
+  free(output);
+  free(input);
+  if(started)
+    progress_finish(progress, status == 0);
+  return status;
 }
 
 static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
@@ -918,6 +1060,7 @@ int main(int argc, char **argv)
   const char **masks = NULL;
   size_t mask_count = 0;
   turtledeflate_config_t config;
+  int fast_level = 0;
   int archive_arg = 1;
   int level = 7;
   int recursive = 0;
@@ -954,7 +1097,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "usage: turzip [-1..-9] [-r] archive_name file[s] [@MASK ...]\n");
     return 1;
   }
-  if(load_config(argv[0], level, &config))
+  if(load_config(argv[0], level, &config, &fast_level))
     return 1;
   archive_path = archive_name(argv[archive_arg]);
   if(!archive_path)
@@ -1040,7 +1183,8 @@ int main(int argc, char **argv)
   for(i = 0; i < (int)list.count; ++i)
   {
     in = fopen(list.entries[i].path, "rb");
-    if(!in || write_entry(zip, &list.entries[i], in, &config, &progress))
+    if(!in || (level < 7 ? write_fast_entry(zip, &list.entries[i], in, fast_level, &progress) :
+      write_entry(zip, &list.entries[i], in, &config, &progress)))
     {
       fprintf(stderr, "turzip: cannot archive %s\n", list.entries[i].path);
       if(in)

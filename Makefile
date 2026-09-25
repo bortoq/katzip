@@ -42,7 +42,7 @@ turzip: turzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) p
 	$(CXX) -pthread -o $@ "$$build_dir/turzip.o" \
 	  "$$build_dir/turtledeflate.o" "$$build_dir/turtledeflate_tree.o" \
 	  "$$build_dir/turtledeflate_block.o" "$$build_dir/turtledeflate_bitstream.o" \
-	  "$$build_dir"/ect_*.o "$$build_dir/minizip/libminizip-ng.a" -lz -lm
+	  "$$build_dir"/ect_*.o "$$build_dir/minizip/libminizip-ng.a" -ldeflate -lz -lm
 
 clean:
 	rm -f turzip
