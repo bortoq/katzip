@@ -38,6 +38,21 @@ class KatzipTests(unittest.TestCase):
             self.assertTrue(info.flag_bits & 0x0800)
             self.assertEqual(len(archive) - info.compress_size, 98 + 2 * len(name.encode()))
 
+    def test_invalid_utf8_filename_has_no_utf8_flag(self):
+        name = b"invalid-\xe0\x80\x80.txt"
+        path = os.fsencode(self.root) + b"/" + name
+        with open(path, "wb") as output:
+            output.write(b"text")
+        result = subprocess.run(
+            [os.fsencode(PROGRAM), b"-1", b"archive", name],
+            cwd=self.root, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as archive:
+            info = archive.infolist()[0]
+            self.assertEqual(info.flag_bits & 0x0800, 0)
+            self.assertEqual(archive.read(info), b"text")
+
     def test_help_text_and_optional_inputs(self):
         expected = (
             "KATZip v1.1 - Deflating with extreme devotion.\n"

@@ -164,48 +164,50 @@ static int valid_name(const char *name)
   return 1;
 }
 
-/* return 1 only for well-formed utf-8 */
+typedef struct {
+  unsigned char low;
+  unsigned char high;
+  unsigned char mask;
+  uint32_t minimum;
+  int continuations;
+} UTF8_LEAD;
+
+/* Reject invalid leading bytes, incomplete sequences and invalid code points. */
 static int valid_utf8(const char *name)
 {
+  static const UTF8_LEAD leads[] = {
+    {0xc2, 0xdf, 0x1f, 0x80, 1},
+    {0xe0, 0xef, 0x0f, 0x800, 2},
+    {0xf0, 0xf4, 0x07, 0x10000, 3}
+  };
   const unsigned char *p = (const unsigned char*)name;
-  uint32_t codepoint;
-  uint32_t minimum;
-  int count;
-  int i;
   while(*p)
   {
+    uint32_t codepoint;
+    size_t lead_index;
+    int i;
     if(*p < 0x80)
     {
       ++p;
       continue;
     }
-    if(*p >= 0xc2 && *p <= 0xdf)
+    for(lead_index = 0; lead_index < ARRAY_N(leads); ++lead_index)
     {
-      codepoint = *p++ & 0x1f;
-      minimum = 0x80;
-      count = 1;
+      if(*p >= leads[lead_index].low && *p <= leads[lead_index].high)
+        break;
     }
-    else if(*p >= 0xe0 && *p <= 0xef)
-    {
-      codepoint = *p++ & 0x0f;
-      minimum = 0x800;
-      count = 2;
-    }
-    else if(*p >= 0xf0 && *p <= 0xf4)
-    {
-      codepoint = *p++ & 0x07;
-      minimum = 0x10000;
-      count = 3;
-    }
-    else
+    if(lead_index == ARRAY_N(leads))
       return 0;
-    for(i = 0; i < count; ++i)
+    codepoint = *p++ & leads[lead_index].mask;
+    for(i = 0; i < leads[lead_index].continuations; ++i)
     {
       if(!*p || (*p & 0xc0) != 0x80)
         return 0;
       codepoint = (codepoint << 6) | (*p++ & 0x3f);
     }
-    if(codepoint < minimum || (codepoint >= 0xd800 && codepoint <= 0xdfff) || codepoint > 0x10ffff)
+    if(codepoint < leads[lead_index].minimum ||
+      (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
+      codepoint > 0x10ffff)
       return 0;
   }
   return 1;
