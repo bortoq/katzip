@@ -1,3 +1,8 @@
+/*
+ * katzip has five stages: read settings, collect inputs, compress entries,
+ * validate the temporary ZIP, and publish it with rename(). Each stage owns
+ * its resources and returns an error to the next outer stage for cleanup.
+ */
 #define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>
@@ -206,13 +211,24 @@ static int valid_utf8(const char *name)
   return 1;
 }
 
+/* Percentages use hundredths of a percent to avoid floating output drift. */
+static void print_progress_value(PROGRESS *progress, uint64_t percent)
+{
+  int width = fprintf(stderr, "\r%s %llu.%02llu%%",
+    progress->entry->name, (unsigned long long)(percent / 100),
+    (unsigned long long)(percent % 100));
+  int i;
+  for(i = width; i < progress->display_width; ++i)
+    fputc(' ', stderr);
+  progress->display_width = width;
+  fflush(stderr);
+}
+
 static void show_progress(PROGRESS *progress, int timer_tick)
 {
   const ENTRY *entry = progress->entry;
   double done = progress->done;
   double percent;
-  int width;
-  int i;
   if(progress->pass && progress->pass_total && done < entry->expected_size)
   {
     double work = progress->pass - 1 + (double)progress->pass_done / progress->pass_total;
@@ -227,12 +243,7 @@ static void show_progress(PROGRESS *progress, int timer_tick)
     (uint64_t)percent == progress->displayed_percent && progress->displayed_percent < 9999)
     percent = progress->displayed_percent + 1;
   progress->displayed_percent = (uint64_t)percent;
-  width = fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
-    (unsigned long long)(percent / 100), (unsigned long long)((uint64_t)percent % 100));
-  for(i = width; i < progress->display_width; ++i)
-    fputc(' ', stderr);
-  progress->display_width = width;
-  fflush(stderr);
+  print_progress_value(progress, (uint64_t)percent);
 }
 
 static void *progress_thread(void *argument)
@@ -276,13 +287,15 @@ static int progress_init(PROGRESS *progress)
   return 0;
 }
 
-static void progress_start(PROGRESS *progress, const ENTRY *entry, const turtledeflate_config_t *config)
+static void progress_start(PROGRESS *progress, const ENTRY *entry,
+  const turtledeflate_config_t *config)
 {
   pthread_mutex_lock(&progress->mutex);
   progress->entry = entry;
   progress->done = 0;
   progress->block_size = 0;
-  progress->pass_scale = config ? 2.0 * config->i_num_start_fp * config->i_max_block_splitter_iterations : 1.0;
+  progress->pass_scale = config ? 2.0 * config->i_num_start_fp *
+    config->i_max_block_splitter_iterations : 1.0;
   progress->pass = 0;
   progress->pass_done = 0;
   progress->pass_total = 0;
@@ -331,19 +344,15 @@ static void progress_callback(void *user, uint32_t pass, uint32_t completed, uin
 static void progress_finish(PROGRESS *progress, int success)
 {
   uint64_t percent;
-  int width;
-  int i;
   pthread_mutex_lock(&progress->mutex);
   progress->block_size = 0;
   progress->pass = 0;
   if(success)
   {
     percent = progress->entry->size ?
-      (progress->entry->compressed_size * 10000 + progress->entry->size / 2) / progress->entry->size : 0;
-    width = fprintf(stderr, "\r%s %llu.%02llu%%", progress->entry->name,
-      (unsigned long long)(percent / 100), (unsigned long long)(percent % 100));
-    for(i = width; i < progress->display_width; ++i)
-      fputc(' ', stderr);
+      (progress->entry->compressed_size * 10000 +
+        progress->entry->size / 2) / progress->entry->size : 0;
+    print_progress_value(progress, percent);
   }
   else
     show_progress(progress, 0);
@@ -375,105 +384,120 @@ static char *trim(char *text)
   return text;
 }
 
-/* locate the installed executable even when the shell found it through PATH */
-static char *executable_config_path(const char *program)
+/* Resolve PATH only when argv[0] does not contain a directory. */
+static char *executable_from_path(const char *program)
 {
-  const char *search;
-  const char *end;
-  const char *slash;
-  char *executable = realpath("/proc/self/exe", NULL);
-  char *candidate;
-  char *path;
-  size_t length;
-  if(!executable && strchr(program, '/'))
-    executable = realpath(program, NULL);
-  search = getenv("PATH");
-  while(!executable && !strchr(program, '/') && search)
+  const char *search = getenv("PATH");
+  while(search)
   {
-    end = strchr(search, ':');
-    length = end ? (size_t)(end - search) : strlen(search);
-    candidate = malloc(length + strlen(program) + 3);
+    const char *end = strchr(search, ':');
+    size_t length = end ? (size_t)(end - search) : strlen(search);
+    size_t directory_size = length ? length : 1;
+    char *candidate = malloc(directory_size + strlen(program) + 2);
+    char *resolved = NULL;
     if(!candidate)
       return NULL;
     if(length)
       memcpy(candidate, search, length);
     else
       candidate[0] = '.';
-    candidate[length ? length : 1] = '/';
-    strcpy(candidate + (length ? length : 1) + 1, program);
+    candidate[directory_size] = '/';
+    strcpy(candidate + directory_size + 1, program);
     if(access(candidate, X_OK) == 0)
-      executable = realpath(candidate, NULL);
+      resolved = realpath(candidate, NULL);
     free(candidate);
+    if(resolved)
+      return resolved;
     search = end ? end + 1 : NULL;
   }
+  return NULL;
+}
+
+/* /proc finds the real binary even when it was launched through PATH. */
+static char *executable_config_path(const char *program)
+{
+  char *executable = realpath("/proc/self/exe", NULL);
+  const char *slash;
+  char *path;
+  size_t directory_size;
+  if(!executable)
+    executable = strchr(program, '/') ?
+      realpath(program, NULL) : executable_from_path(program);
   if(!executable)
     return NULL;
   slash = strrchr(executable, '/');
-  length = slash ? (size_t)(slash - executable + 1) : 0;
-  path = malloc(length + sizeof("katzip.ini"));
+  directory_size = slash ? (size_t)(slash - executable + 1) : 0;
+  path = malloc(directory_size + sizeof("katzip.ini"));
   if(path)
   {
-    memcpy(path, executable, length);
-    strcpy(path + length, "katzip.ini");
+    memcpy(path, executable, directory_size);
+    strcpy(path + directory_size, "katzip.ini");
   }
   free(executable);
   return path;
 }
 
-/* an explicit override is strict; only absent files in the default locations fall back */
-static int open_config(const char *program, FILE **file, char **path)
+/* Return 1 when a candidate does not exist, and -1 for other errors. */
+static int open_named_config(const char *name, FILE **file, char **path)
 {
-  const char *override = getenv("KATZIP_INI");
-  int error_number;
-  if(override && *override)
-  {
-    *path = strdup(override);
-    if(!*path)
-      goto out_of_memory;
-    *file = fopen(*path, "r");
-    if(*file)
-      return 0;
-    goto open_error;
-  }
-  *path = strdup("katzip.ini");
+  int saved_error;
+  *path = strdup(name);
   if(!*path)
-    goto out_of_memory;
+  {
+    fprintf(stderr, "katzip: out of memory\n");
+    return -1;
+  }
   *file = fopen(*path, "r");
   if(*file)
     return 0;
-  error_number = errno;
-  if(error_number != ENOENT && error_number != ENOTDIR)
-    goto open_error;
+  saved_error = errno;
+  if(saved_error != ENOENT && saved_error != ENOTDIR)
+    fprintf(stderr, "katzip: cannot open %s: %s\n", name, strerror(saved_error));
   free(*path);
-  *path = executable_config_path(program);
-  if(*path)
+  *path = NULL;
+  return saved_error == ENOENT || saved_error == ENOTDIR ? 1 : -1;
+}
+
+static int open_config(const char *program, FILE **file, char **path)
+{
+  const char *override = getenv("KATZIP_INI");
+  char *installed_path;
+  int result;
+  if(override && *override)
   {
-    *file = fopen(*path, "r");
-    if(*file)
-      return 0;
-    error_number = errno;
-    if(error_number != ENOENT && error_number != ENOTDIR)
-      goto open_error;
-    free(*path);
+    result = open_named_config(override, file, path);
+    if(result == 1)
+      fprintf(stderr, "katzip: cannot open %s: %s\n", override, strerror(ENOENT));
+    return result == 0 ? 0 : -1;
+  }
+  result = open_named_config("katzip.ini", file, path);
+  if(result != 1)
+    return result;
+  installed_path = executable_config_path(program);
+  if(installed_path)
+  {
+    result = open_named_config(installed_path, file, path);
+    free(installed_path);
+    if(result != 1)
+      return result;
   }
   *path = strdup("built-in settings");
   if(!*path)
-    goto out_of_memory;
-  *file = fmemopen((void*)katzip_default_ini, sizeof(katzip_default_ini) - 1, "r");
-  if(!*file)
   {
-    fprintf(stderr, "katzip: cannot read built-in settings: %s\n", strerror(errno));
+    fprintf(stderr, "katzip: out of memory\n");
     return -1;
   }
-  fprintf(stderr, "katzip: warning: katzip.ini not found in current or executable directory; using built-in compression settings\n");
+  *file = fmemopen((void*)katzip_default_ini,
+    sizeof(katzip_default_ini) - 1, "r");
+  if(!*file)
+  {
+    fprintf(stderr, "katzip: cannot read built-in settings: %s\n",
+      strerror(errno));
+    return -1;
+  }
+  fprintf(stderr, "katzip: warning: katzip.ini not found in current "
+    "or executable directory; using built-in compression settings\n");
   return 0;
-
-open_error:
-  fprintf(stderr, "katzip: cannot open %s: %s\n", *path, strerror(errno));
-  return -1;
-out_of_memory:
-  fprintf(stderr, "katzip: out of memory\n");
-  return -1;
 }
 
 static int valid_config(const turtledeflate_config_t *config, int level)
@@ -501,117 +525,164 @@ static int valid_config(const turtledeflate_config_t *config, int level)
     config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
 }
 
-static int load_config(const char *program, int level, turtledeflate_config_t *config, int *fast_level)
+/* The table also assigns one bit to each required Turtledeflate setting. */
+static const CONFIG_FIELD config_fields[] = {
+  {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
+  {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
+  {"i_maximum_subblocks", offsetof(turtledeflate_config_t, i_maximum_subblocks), 0},
+  {"i_max_block_splitter_iterations",
+    offsetof(turtledeflate_config_t, i_max_block_splitter_iterations), 0},
+  {"i_max_internal_block_splitter_iterations",
+    offsetof(turtledeflate_config_t, i_max_internal_block_splitter_iterations), 0},
+  {"i_block_splitter_num_points", offsetof(turtledeflate_config_t, i_block_splitter_num_points), 0},
+  {"i_block_splitter_center_dist",
+    offsetof(turtledeflate_config_t, i_block_splitter_center_dist), 0},
+  {"i_block_splitter_min_range_for_points",
+    offsetof(turtledeflate_config_t, i_block_splitter_min_range_for_points), 0},
+  {"b_block_splitter_push_split", offsetof(turtledeflate_config_t, b_block_splitter_push_split), 1},
+  {"i_min_start_fp", offsetof(turtledeflate_config_t, i_min_start_fp), 0},
+  {"i_max_start_fp", offsetof(turtledeflate_config_t, i_max_start_fp), 0},
+  {"i_num_start_fp", offsetof(turtledeflate_config_t, i_num_start_fp), 0},
+  {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
+};
+
+/* Keep parsing separate from file lookup so both INI sources use one validator. */
+static int parse_setting(char *line, int level, turtledeflate_config_t *config,
+  int *fast_level, uint32_t *seen)
 {
-  static const CONFIG_FIELD fields[] = {
-    {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
-    {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
-    {"i_maximum_subblocks", offsetof(turtledeflate_config_t, i_maximum_subblocks), 0},
-    {"i_max_block_splitter_iterations", offsetof(turtledeflate_config_t, i_max_block_splitter_iterations), 0},
-    {"i_max_internal_block_splitter_iterations", offsetof(turtledeflate_config_t, i_max_internal_block_splitter_iterations), 0},
-    {"i_block_splitter_num_points", offsetof(turtledeflate_config_t, i_block_splitter_num_points), 0},
-    {"i_block_splitter_center_dist", offsetof(turtledeflate_config_t, i_block_splitter_center_dist), 0},
-    {"i_block_splitter_min_range_for_points", offsetof(turtledeflate_config_t, i_block_splitter_min_range_for_points), 0},
-    {"b_block_splitter_push_split", offsetof(turtledeflate_config_t, b_block_splitter_push_split), 1},
-    {"i_min_start_fp", offsetof(turtledeflate_config_t, i_min_start_fp), 0},
-    {"i_max_start_fp", offsetof(turtledeflate_config_t, i_max_start_fp), 0},
-    {"i_num_start_fp", offsetof(turtledeflate_config_t, i_num_start_fp), 0},
-    {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
-  };
-  char section[32];
-  char line[256];
-  char *path = NULL;
-  char *key;
-  char *value;
+  char *value = strchr(line, '=');
   char *end;
-  FILE *file;
-  uint32_t seen = 0;
   long number;
   size_t i;
+  if(!value)
+    return -1;
+  *value++ = 0;
+  line = trim(line);
+  value = trim(value);
+  errno = 0;
+  number = strtol(value, &end, 10);
+  if(!*value || *end || errno == ERANGE ||
+    number < INT32_MIN || number > INT32_MAX)
+    return -1;
+  if(level < 7)
+  {
+    if(strcmp(line, "level") || *seen || number < 1 || number > 12)
+      return -1;
+    *fast_level = (int)number;
+    *seen = 1;
+    return 0;
+  }
+  for(i = 0; i < ARRAY_N(config_fields); ++i)
+  {
+    if(strcmp(line, config_fields[i].name) == 0)
+      break;
+  }
+  if(i == ARRAY_N(config_fields) || (*seen & (UINT32_C(1) << i)))
+    return -1;
+  if(config_fields[i].boolean)
+  {
+    if(number != 0 && number != 1)
+      return -1;
+    *(bool*)((unsigned char*)config + config_fields[i].offset) = number != 0;
+  }
+  else
+    *(int32_t*)((unsigned char*)config + config_fields[i].offset) =
+      (int32_t)number;
+  *seen |= UINT32_C(1) << i;
+  return 0;
+}
+
+static int config_is_complete(int level, int found, uint32_t seen,
+  const turtledeflate_config_t *config)
+{
+  if(!found)
+    return 0;
+  if(level < 7)
+    return seen == 1;
+  return seen == (UINT32_C(1) << ARRAY_N(config_fields)) - 1 &&
+    valid_config(config, level);
+}
+
+static int read_config(FILE *file, const char *path, int level,
+  turtledeflate_config_t *config, int *fast_level)
+{
+  char section[32];
+  char line[256];
+  char *text;
+  uint32_t seen = 0;
   int active = 0;
   int found = 0;
   int line_number = 0;
-  int status = -1;
-  if(open_config(program, &file, &path))
-  {
-    free(path);
-    return -1;
-  }
-  snprintf(section, sizeof(section), level < 7 ? "[libdeflate-%d]" : "[turtledeflate-%d]", level);
+  int invalid = 0;
+  snprintf(section, sizeof(section),
+    level < 7 ? "[libdeflate-%d]" : "[turtledeflate-%d]", level);
   memset(config, 0, sizeof(*config));
   *fast_level = 0;
   while(fgets(line, sizeof(line), file))
   {
     ++line_number;
     if(!strchr(line, '\n') && !feof(file))
-      goto bad_line;
-    key = trim(line);
-    if(!*key || *key == '#' || *key == ';')
-      continue;
-    if(*key == '[')
     {
-      active = strcmp(key, section) == 0;
-      if(active && found++)
-        goto bad_line;
-      continue;
+      invalid = 1;
+      break;
     }
-    if(!active)
+    text = trim(line);
+    if(!*text || *text == '#' || *text == ';')
       continue;
-    value = strchr(key, '=');
-    if(!value)
-      goto bad_line;
-    *value++ = 0;
-    key = trim(key);
-    value = trim(value);
-    errno = 0;
-    number = strtol(value, &end, 10);
-    if(!*value || *end || errno == ERANGE || number < INT32_MIN || number > INT32_MAX)
-      goto bad_line;
-    if(level < 7)
+    if(*text == '[')
     {
-      if(strcmp(key, "level") || seen || number < 1 || number > 12)
-        goto bad_line;
-      *fast_level = (int)number;
-      seen = 1;
+      active = strcmp(text, section) == 0;
+      if(active)
+      {
+        if(found)
+        {
+          invalid = 1;
+          break;
+        }
+        found = 1;
+      }
       continue;
     }
-    for(i = 0; i < ARRAY_N(fields); ++i)
+    if(active && parse_setting(text, level, config, fast_level, &seen))
     {
-      if(strcmp(key, fields[i].name) == 0)
-        break;
+      invalid = 1;
+      break;
     }
-    if(i == ARRAY_N(fields) || (seen & (UINT32_C(1) << i)))
-      goto bad_line;
-    if(fields[i].boolean)
-    {
-      if(number != 0 && number != 1)
-        goto bad_line;
-      *(bool*)((unsigned char*)config + fields[i].offset) = number != 0;
-    }
-    else
-      *(int32_t*)((unsigned char*)config + fields[i].offset) = (int32_t)number;
-    seen |= UINT32_C(1) << i;
+  }
+  if(invalid)
+  {
+    fprintf(stderr, "katzip: invalid setting in %s:%d\n", path, line_number);
+    return -1;
   }
   if(ferror(file))
   {
     fprintf(stderr, "katzip: cannot read %s\n", path);
-    goto done;
+    return -1;
   }
-  if(!found || (level < 7 ? (seen != 1 || !*fast_level) :
-    (seen != (UINT32_C(1) << ARRAY_N(fields)) - 1 || !valid_config(config, level))))
+  if(!config_is_complete(level, found, seen, config))
   {
-    fprintf(stderr, "katzip: missing or invalid settings in %s %s\n", path, section);
-    goto done;
+    fprintf(stderr, "katzip: missing or invalid settings in %s %s\n",
+      path, section);
+    return -1;
   }
-  status = 0;
-  goto done;
+  return 0;
+}
 
-bad_line:
-  fprintf(stderr, "katzip: invalid setting in %s:%d\n", path, line_number);
-done:
+static int load_config(const char *program, int level,
+  turtledeflate_config_t *config, int *fast_level)
+{
+  char *path = NULL;
+  FILE *file;
+  int result;
+  if(open_config(program, &file, &path))
+  {
+    free(path);
+    return -1;
+  }
+  result = read_config(file, path, level, config, fast_level);
   fclose(file);
   free(path);
-  return status;
+  return result;
 }
 
 /* raw DEFLATE is already compressed; this level only sets the ZIP hint bits. */
@@ -626,282 +697,380 @@ static int zip_level_hint(int level)
   return 9;
 }
 
-static int write_deflate_chunk(void *zip, FILE *temporary, const unsigned char *data, int size)
+/* minizip-ng packages raw DEFLATE without recompressing it. */
+static mz_zip_file zip_file_info(const ENTRY *entry, int method)
 {
-  if(temporary)
-    return fwrite(data, 1, (size_t)size, temporary) == (size_t)size ? 0 : -1;
-  return mz_zip_entry_write(zip, data, size) == size ? 0 : -1;
+  mz_zip_file info;
+  memset(&info, 0, sizeof(info));
+  info.version_madeby = (3 << 8) | 20;
+  info.version_needed = 20;
+  info.flag = entry->flags;
+  info.compression_method = method;
+  info.uncompressed_size = entry->expected_size;
+  info.zip64 = MZ_ZIP64_DISABLE;
+  info.modified_date = entry->mtime;
+  info.filename = entry->name;
+  info.filename_size = entry->name_len;
+  info.external_fa = entry->mode << 16;
+  return info;
 }
 
-/* libdeflate compresses a complete buffer; large files use streaming zlib. */
-static int write_fast_entry(void *zip, ENTRY *entry, FILE *in, int level, int zip_level, PROGRESS *progress)
+static int open_zip_entry(void *zip, const ENTRY *entry, int method,
+  int level)
 {
-  mz_zip_file file_info;
-  struct libdeflate_compressor *compressor = NULL;
-  unsigned char *input = NULL;
-  unsigned char *output = NULL;
-  z_stream stream;
-  uint32_t crc = UINT32_MAX;
-  size_t size;
-  size_t output_size = 0;
-  size_t offset;
-  int method = MZ_COMPRESS_METHOD_DEFLATE;
-  int started = 0;
-  int status = -1;
-  int result;
+  mz_zip_file info = zip_file_info(entry, method);
+  return mz_zip_entry_write_open(zip, &info, level,
+    1, NULL) == MZ_OK ? 0 : -1;
+}
 
-  memset(&file_info, 0, sizeof(file_info));
-  file_info.version_madeby = (3 << 8) | 20;
-  file_info.version_needed = 20;
-  file_info.flag = entry->flags;
-  file_info.uncompressed_size = entry->expected_size;
-  file_info.zip64 = MZ_ZIP64_DISABLE;
-  file_info.modified_date = entry->mtime;
-  file_info.filename = entry->name;
-  file_info.filename_size = entry->name_len;
-  file_info.external_fa = entry->mode << 16;
-  progress_start(progress, entry, NULL);
-  started = 1;
+static int close_zip_entry(void *zip, const ENTRY *entry, uint32_t crc)
+{
+  return mz_zip_entry_write_close(zip, crc ^ UINT32_MAX,
+    entry->compressed_size, entry->size) == MZ_OK ? 0 : -1;
+}
 
-  if(entry->expected_size <= FAST_FILE_LIMIT)
+static int write_zip_bytes(void *zip, const unsigned char *data,
+  size_t size)
+{
+  size_t offset = 0;
+  while(offset < size)
   {
-    size = entry->expected_size;
-    input = malloc(size ? size : 1);
-    if(!input || fread(input, 1, size, in) != size || fgetc(in) != EOF || ferror(in))
-      goto done;
-    entry->size = (uint32_t)size;
-    crc = update_crc(crc, input, size);
-    progress_block(progress, (uint32_t)size);
-    compressor = libdeflate_alloc_compressor(level);
-    if(!compressor)
-      goto done;
-    /* A result that does not save space is written as ZIP Store. */
-    output = malloc(size + 16);
-    if(!output)
-      goto done;
-    if(size)
-      output_size = libdeflate_deflate_compress(compressor, input, size, output, size + 16);
-    else
-    {
-      output[0] = 0x03;
-      output[1] = 0x00;
-      output_size = 2;
-    }
-    if(size && (!output_size || output_size >= size))
-      method = MZ_COMPRESS_METHOD_STORE;
-    file_info.compression_method = method;
-    if(mz_zip_entry_write_open(zip, &file_info, zip_level, 1, NULL) != MZ_OK)
-      goto done;
-    for(offset = 0; offset < (method == MZ_COMPRESS_METHOD_STORE ? size : output_size);)
-    {
-      size_t left = (method == MZ_COMPRESS_METHOD_STORE ? size : output_size) - offset;
-      size_t chunk = left > 1048576 ? 1048576 : left;
-      const unsigned char *data = method == MZ_COMPRESS_METHOD_STORE ? input : output;
-      if(mz_zip_entry_write(zip, data + offset, (int32_t)chunk) != (int32_t)chunk)
-        goto done;
-      offset += chunk;
-    }
-    entry->compressed_size = method == MZ_COMPRESS_METHOD_STORE ? size : output_size;
-    progress_update(progress, entry->size);
+    size_t chunk = size - offset;
+    if(chunk > 1048576)
+      chunk = 1048576;
+    if(mz_zip_entry_write(zip, data + offset, (int32_t)chunk) !=
+      (int32_t)chunk)
+      return -1;
+    offset += chunk;
   }
+  return 0;
+}
+
+/* Small files fit in memory, so libdeflate can choose Store when useful. */
+static int compress_small_data(void *zip, ENTRY *entry, FILE *in,
+  struct libdeflate_compressor *compressor, unsigned char *input,
+  unsigned char *output, int zip_level, PROGRESS *progress, uint32_t *crc)
+{
+  size_t size = entry->expected_size;
+  size_t compressed_size;
+  int method = MZ_COMPRESS_METHOD_DEFLATE;
+  if(fread(input, 1, size, in) != size || fgetc(in) != EOF || ferror(in))
+    return -1;
+  entry->size = (uint32_t)size;
+  *crc = update_crc(*crc, input, size);
+  progress_block(progress, entry->size);
+  if(size)
+    compressed_size = libdeflate_deflate_compress(compressor, input,
+      size, output, size + 16);
   else
   {
-    input = malloc(1048576);
-    output = malloc(1048576);
-    if(!input || !output)
-      goto done;
-    memset(&stream, 0, sizeof(stream));
-    if(deflateInit2(&stream, level > 9 ? 9 : level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
-      goto done;
-    file_info.compression_method = MZ_COMPRESS_METHOD_DEFLATE;
-    if(mz_zip_entry_write_open(zip, &file_info, zip_level, 1, NULL) != MZ_OK)
-    {
-      deflateEnd(&stream);
-      goto done;
-    }
-    do
-    {
-      size = fread(input, 1, 1048576, in);
-      if(ferror(in) || (uint64_t)entry->size + size > entry->expected_size)
-      {
-        deflateEnd(&stream);
-        goto done;
-      }
-      crc = update_crc(crc, input, size);
-      entry->size += (uint32_t)size;
-      progress_block(progress, (uint32_t)size);
-      stream.next_in = input;
-      stream.avail_in = (uInt)size;
-      do
-      {
-        stream.next_out = output;
-        stream.avail_out = 1048576;
-        result = deflate(&stream, size ? Z_NO_FLUSH : Z_FINISH);
-        if(result != Z_OK && result != Z_STREAM_END)
-        {
-          deflateEnd(&stream);
-          goto done;
-        }
-        output_size = 1048576 - stream.avail_out;
-        if(output_size && mz_zip_entry_write(zip, output, (int32_t)output_size) != (int32_t)output_size)
-        {
-          deflateEnd(&stream);
-          goto done;
-        }
-        entry->compressed_size += output_size;
-      } while(stream.avail_in || stream.avail_out == 0 || (!size && result != Z_STREAM_END));
-      progress_update(progress, entry->size);
-    } while(size);
-    deflateEnd(&stream);
-    if(entry->size != entry->expected_size)
-      goto done;
+    output[0] = 0x03;
+    output[1] = 0x00;
+    compressed_size = 2;
   }
-  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, entry->compressed_size, entry->size) != MZ_OK)
-    goto done;
-  status = 0;
+  if(size && (!compressed_size || compressed_size >= size))
+    method = MZ_COMPRESS_METHOD_STORE;
+  if(open_zip_entry(zip, entry, method, zip_level))
+    return -1;
+  entry->compressed_size = method == MZ_COMPRESS_METHOD_STORE ?
+    size : compressed_size;
+  if(write_zip_bytes(zip, method == MZ_COMPRESS_METHOD_STORE ?
+    input : output, (size_t)entry->compressed_size))
+    return -1;
+  progress_update(progress, entry->size);
+  return 0;
+}
 
-done:
+static int compress_small_entry(void *zip, ENTRY *entry, FILE *in,
+  int level, int zip_level, PROGRESS *progress, uint32_t *crc)
+{
+  size_t size = entry->expected_size;
+  unsigned char *input = malloc(size ? size : 1);
+  unsigned char *output = malloc(size + 16);
+  struct libdeflate_compressor *compressor =
+    libdeflate_alloc_compressor(level);
+  int result = -1;
+  if(input && output && compressor)
+    result = compress_small_data(zip, entry, in, compressor, input,
+      output, zip_level, progress, crc);
   if(compressor)
     libdeflate_free_compressor(compressor);
   free(output);
   free(input);
-  if(started)
-    progress_finish(progress, status == 0);
-  return status;
+  return result;
 }
 
-static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
+/* zlib keeps memory bounded when a file is too large for libdeflate. */
+static int deflate_stream_chunk(void *zip, z_stream *stream,
+  unsigned char *output, int flush, ENTRY *entry)
 {
-  unsigned char *buffer;
-  unsigned char *compressed;
-  turtledeflate_config_t compressor_config = *config;
-  mz_zip_file file_info;
-  ECT_JOB ect;
-  FILE *turtle_temp = NULL;
-  void *compressor = NULL;
-  uint32_t crc = UINT32_MAX;
-  int64_t compressed_total = 0;
-  int64_t chosen_total;
-  size_t size;
-  size_t transferred;
-  int next;
-  int compressed_size;
-  int progress_started = 0;
-  int use_ect = 0;
-  int status = -1;
+  int result;
+  do
+  {
+    size_t produced;
+    stream->next_out = output;
+    stream->avail_out = 1048576;
+    result = deflate(stream, flush);
+    if(result != Z_OK && result != Z_STREAM_END)
+      return -1;
+    produced = 1048576 - stream->avail_out;
+    if(write_zip_bytes(zip, output, produced))
+      return -1;
+    entry->compressed_size += produced;
+  } while(stream->avail_in || stream->avail_out == 0 ||
+    (flush == Z_FINISH && result != Z_STREAM_END));
+  return 0;
+}
 
-  memset(&ect, 0, sizeof(ect));
-  buffer = malloc((size_t)config->i_maximum_block_size);
-  if(!buffer)
-    return -1;
-  if(config->i_compression_level == 9 && start_ect_job(&ect, in, entry->expected_size))
-    goto done;
-  if(ect.started)
+static int compress_stream_data(void *zip, ENTRY *entry, FILE *in,
+  z_stream *stream, unsigned char *input, unsigned char *output,
+  PROGRESS *progress, uint32_t *crc)
+{
+  size_t size;
+  do
   {
-    turtle_temp = tmpfile();
-    if(!turtle_temp)
-      goto done;
-  }
-  memset(&file_info, 0, sizeof(file_info));
-  file_info.version_madeby = (3 << 8) | 20;
-  file_info.version_needed = 20;
-  file_info.flag = entry->flags;
-  file_info.compression_method = MZ_COMPRESS_METHOD_DEFLATE;
-  file_info.uncompressed_size = entry->expected_size;
-  file_info.zip64 = MZ_ZIP64_DISABLE;
-  file_info.modified_date = entry->mtime;
-  file_info.filename = entry->name;
-  file_info.filename_size = entry->name_len;
-  file_info.external_fa = entry->mode << 16;
-  if(!turtle_temp && mz_zip_entry_write_open(zip, &file_info, zip_level_hint(config->i_compression_level), 1, NULL) != MZ_OK)
-    goto done;
-  size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
-  if(ferror(in))
-    goto done;
-  if(size && !turtledeflate_create(&compressor, &compressor_config))
-    goto done;
-  progress_start(progress, entry, config);
-  progress_started = 1;
-  if(compressor)
-    turtledeflate_set_progress_callback(compressor, progress_callback, progress);
-  while(size)
-  {
-    next = fgetc(in);
-    if(next != EOF && ungetc(next, in) == EOF)
-      goto done;
-    if(next == EOF && ferror(in))
-      goto done;
-    if((uint64_t)entry->size + size > UINT32_MAX)
-      goto done;
-    crc = update_crc(crc, buffer, size);
+    size = fread(input, 1, 1048576, in);
+    if(ferror(in) || (uint64_t)entry->size + size > entry->expected_size)
+      return -1;
+    *crc = update_crc(*crc, input, size);
     entry->size += (uint32_t)size;
     progress_block(progress, (uint32_t)size);
-    compressed_size = turtledeflate_block(compressor, (int32_t)size, buffer, &compressed, NULL, next == EOF);
-    if(compressed_size < 0 || write_deflate_chunk(zip, turtle_temp, compressed, compressed_size))
-      goto done;
-    compressed_total += compressed_size;
+    stream->next_in = input;
+    stream->avail_in = (uInt)size;
+    if(deflate_stream_chunk(zip, stream, output,
+      size ? Z_NO_FLUSH : Z_FINISH, entry))
+      return -1;
     progress_update(progress, entry->size);
-    if(next == EOF)
+  } while(size);
+  return entry->size == entry->expected_size ? 0 : -1;
+}
+
+static int compress_stream_entry(void *zip, ENTRY *entry, FILE *in,
+  int level, int zip_level, PROGRESS *progress, uint32_t *crc)
+{
+  unsigned char *input = malloc(1048576);
+  unsigned char *output = malloc(1048576);
+  z_stream stream;
+  int result = -1;
+  if(!input || !output)
+  {
+    free(output);
+    free(input);
+    return -1;
+  }
+  memset(&stream, 0, sizeof(stream));
+  if(deflateInit2(&stream, level > 9 ? 9 : level, Z_DEFLATED,
+    -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+  {
+    free(output);
+    free(input);
+    return -1;
+  }
+  if(!open_zip_entry(zip, entry, MZ_COMPRESS_METHOD_DEFLATE, zip_level))
+    result = compress_stream_data(zip, entry, in, &stream,
+      input, output, progress, crc);
+  deflateEnd(&stream);
+  free(output);
+  free(input);
+  return result;
+}
+
+static int write_fast_entry(void *zip, ENTRY *entry, FILE *in,
+  int level, int zip_level, PROGRESS *progress)
+{
+  uint32_t crc = UINT32_MAX;
+  int result;
+  progress_start(progress, entry, NULL);
+  if(entry->expected_size <= FAST_FILE_LIMIT)
+    result = compress_small_entry(zip, entry, in, level,
+      zip_level, progress, &crc);
+  else
+    result = compress_stream_entry(zip, entry, in, level,
+      zip_level, progress, &crc);
+  if(!result)
+    result = close_zip_entry(zip, entry, crc);
+  progress_finish(progress, result == 0);
+  return result;
+}
+
+typedef struct {
+  unsigned char *buffer;
+  void *compressor;
+  FILE *temporary;
+  ECT_JOB ect;
+  uint32_t crc;
+  uint64_t compressed_size;
+} TURTLE_WORK;
+
+static void finish_turtle_work(TURTLE_WORK *work)
+{
+  if(work->ect.started)
+    pthread_join(work->ect.thread, NULL);
+  free(work->ect.input);
+  free(work->ect.output);
+  if(work->temporary)
+    fclose(work->temporary);
+  if(work->compressor)
+    turtledeflate_destroy(work->compressor);
+  free(work->buffer);
+}
+
+static int prepare_turtle_work(TURTLE_WORK *work, FILE *in,
+  const ENTRY *entry, const turtledeflate_config_t *config)
+{
+  memset(work, 0, sizeof(*work));
+  work->crc = UINT32_MAX;
+  work->buffer = malloc((size_t)config->i_maximum_block_size);
+  if(!work->buffer)
+    return -1;
+  if(config->i_compression_level == 9 &&
+    start_ect_job(&work->ect, in, entry->expected_size))
+    return -1;
+  if(work->ect.started)
+  {
+    work->temporary = tmpfile();
+    if(!work->temporary)
+      return -1;
+  }
+  return 0;
+}
+
+static int write_deflate_chunk(void *zip, FILE *temporary,
+  const unsigned char *data, size_t size)
+{
+  if(temporary)
+    return fwrite(data, 1, size, temporary) == size ? 0 : -1;
+  return write_zip_bytes(zip, data, size);
+}
+
+static int input_has_more(FILE *in)
+{
+  int next = fgetc(in);
+  if(next == EOF)
+    return ferror(in) ? -1 : 0;
+  return ungetc(next, in) == EOF ? -1 : 1;
+}
+
+static int compress_turtle_blocks(void *zip, ENTRY *entry, FILE *in,
+  const turtledeflate_config_t *config, TURTLE_WORK *work,
+  PROGRESS *progress)
+{
+  turtledeflate_config_t compressor_config = *config;
+  unsigned char *compressed;
+  size_t size = fread(work->buffer, 1,
+    (size_t)config->i_maximum_block_size, in);
+  if(ferror(in))
+    return -1;
+  if(size)
+  {
+    if(!turtledeflate_create(&work->compressor, &compressor_config))
+      return -1;
+    turtledeflate_set_progress_callback(work->compressor,
+      progress_callback, progress);
+  }
+  while(size)
+  {
+    int more = input_has_more(in);
+    int compressed_size;
+    if(more < 0 || (uint64_t)entry->size + size > UINT32_MAX)
+      return -1;
+    work->crc = update_crc(work->crc, work->buffer, size);
+    entry->size += (uint32_t)size;
+    progress_block(progress, (uint32_t)size);
+    compressed_size = turtledeflate_block(work->compressor,
+      (int32_t)size, work->buffer, &compressed, NULL, !more);
+    if(compressed_size < 0 || write_deflate_chunk(zip,
+      work->temporary, compressed, (size_t)compressed_size))
+      return -1;
+    work->compressed_size += (uint32_t)compressed_size;
+    progress_update(progress, entry->size);
+    if(!more)
       break;
-    size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
+    size = fread(work->buffer, 1,
+      (size_t)config->i_maximum_block_size, in);
     if(!size || ferror(in))
-      goto done;
+      return -1;
   }
   if(!entry->size)
   {
     const unsigned char empty_deflate[] = {0x03, 0x00};
-    if(write_deflate_chunk(zip, turtle_temp, empty_deflate, sizeof(empty_deflate)))
-      goto done;
-    compressed_total = sizeof(empty_deflate);
+    if(write_deflate_chunk(zip, work->temporary,
+      empty_deflate, sizeof(empty_deflate)))
+      return -1;
+    work->compressed_size = sizeof(empty_deflate);
   }
-  if(entry->size != entry->expected_size)
-    goto done;
-  chosen_total = compressed_total;
-  if(ect.started)
-  {
-    progress_wait(progress);
-    pthread_join(ect.thread, NULL);
-    ect.started = 0;
-    if(ect.crc != (crc ^ UINT32_MAX))
-      goto done;
-    use_ect = ect.output && ect.output_size < (uint64_t)compressed_total && ect.output_size <= UINT32_MAX;
-    if(use_ect)
-      chosen_total = (int64_t)ect.output_size;
-    if(mz_zip_entry_write_open(zip, &file_info, zip_level_hint(config->i_compression_level), 1, NULL) != MZ_OK)
-      goto done;
-    if(!use_ect && fseek(turtle_temp, 0, SEEK_SET))
-      goto done;
-    transferred = 0;
-    while(transferred < (size_t)chosen_total)
-    {
-      size_t chunk = (size_t)chosen_total - transferred;
-      if(chunk > 65536)
-        chunk = 65536;
-      if(!use_ect && fread(buffer, 1, chunk, turtle_temp) != chunk)
-        goto done;
-      if(mz_zip_entry_write(zip, use_ect ? ect.output + transferred : buffer, (int32_t)chunk) != (int32_t)chunk)
-        goto done;
-      transferred += chunk;
-    }
-  }
-  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, chosen_total, entry->size) != MZ_OK)
-    goto done;
-  entry->compressed_size = (uint64_t)chosen_total;
-  status = 0;
+  return entry->size == entry->expected_size ? 0 : -1;
+}
 
-done:
-  if(ect.started)
-    pthread_join(ect.thread, NULL);
-  free(ect.input);
-  free(ect.output);
-  if(turtle_temp)
-    fclose(turtle_temp);
-  if(compressor)
-    turtledeflate_destroy(compressor);
-  free(buffer);
-  if(progress_started)
-    progress_finish(progress, status == 0);
-  return status;
+/* Level 9 tries ECT and Turtledeflate concurrently, then writes the winner. */
+static int write_turtle_winner(void *zip, ENTRY *entry,
+  const turtledeflate_config_t *config, TURTLE_WORK *work,
+  PROGRESS *progress)
+{
+  uint64_t chosen_size = work->compressed_size;
+  const unsigned char *data = NULL;
+  size_t offset = 0;
+  if(!work->ect.started)
+    return 0;
+  progress_wait(progress);
+  pthread_join(work->ect.thread, NULL);
+  work->ect.started = 0;
+  if(work->ect.crc != (work->crc ^ UINT32_MAX))
+    return -1;
+  if(work->ect.output && work->ect.output_size < chosen_size &&
+    work->ect.output_size <= UINT32_MAX)
+  {
+    chosen_size = work->ect.output_size;
+    data = work->ect.output;
+  }
+  if(open_zip_entry(zip, entry, MZ_COMPRESS_METHOD_DEFLATE,
+    zip_level_hint(config->i_compression_level)))
+    return -1;
+  if(!data && fseek(work->temporary, 0, SEEK_SET))
+    return -1;
+  while(offset < chosen_size)
+  {
+    size_t chunk = (size_t)(chosen_size - offset);
+    if(chunk > 65536)
+      chunk = 65536;
+    if(!data && fread(work->buffer, 1, chunk,
+      work->temporary) != chunk)
+      return -1;
+    if(write_zip_bytes(zip, data ? data + offset :
+      work->buffer, chunk))
+      return -1;
+    offset += chunk;
+  }
+  work->compressed_size = chosen_size;
+  return 0;
+}
+
+static int write_entry(void *zip, ENTRY *entry, FILE *in,
+  const turtledeflate_config_t *config, PROGRESS *progress)
+{
+  TURTLE_WORK work;
+  int result;
+  int started = 0;
+  result = prepare_turtle_work(&work, in, entry, config);
+  if(!result && !work.temporary)
+    result = open_zip_entry(zip, entry, MZ_COMPRESS_METHOD_DEFLATE,
+      zip_level_hint(config->i_compression_level));
+  if(!result)
+  {
+    progress_start(progress, entry, config);
+    started = 1;
+    result = compress_turtle_blocks(zip, entry, in, config,
+      &work, progress);
+  }
+  if(!result)
+    result = write_turtle_winner(zip, entry, config, &work, progress);
+  entry->compressed_size = work.compressed_size;
+  if(!result)
+    result = close_zip_entry(zip, entry, work.crc);
+  finish_turtle_work(&work);
+  if(started)
+    progress_finish(progress, result == 0);
+  return result;
 }
 
 static char *copy_text(const char *text)
@@ -935,61 +1104,74 @@ static char *archive_name(const char *argument)
   return name;
 }
 
-static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
+static int inspect_input(const char *path, const char *name,
+  struct stat *file_stat)
 {
-  const char *name = path;
-  struct stat file_stat;
-  ENTRY *entry;
-  ENTRY *grown;
-  size_t capacity;
-  size_t i;
-  while(name[0] == '.' && name[1] == '/')
-    name += 2;
-  if(!valid_name(name) || strlen(name) > UINT16_MAX || stat(path, &file_stat) ||
-    !S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
-    (uint64_t)file_stat.st_size > UINT32_MAX)
+  if(!valid_name(name) || strlen(name) > UINT16_MAX ||
+    stat(path, file_stat) || !S_ISREG(file_stat->st_mode) ||
+    file_stat->st_size < 0 ||
+    (uint64_t)file_stat->st_size > UINT32_MAX)
   {
     fprintf(stderr, "katzip: invalid input file: %s\n", path);
     return -1;
   }
-  if(list->archive_exists && list->archive_stat.st_dev == file_stat.st_dev &&
-    list->archive_stat.st_ino == file_stat.st_ino)
+  return 0;
+}
+
+/* Return 1 when recursion has already discovered this file. */
+static int already_added(const ENTRY_LIST *list, const char *path,
+  const char *name, const struct stat *file_stat, int recursive)
+{
+  size_t i;
+  if(list->archive_exists &&
+    list->archive_stat.st_dev == file_stat->st_dev &&
+    list->archive_stat.st_ino == file_stat->st_ino)
   {
-    if(recursive)
-      return 0;
-    fprintf(stderr, "katzip: archive is an input file: %s\n", path);
-    return -1;
+    if(!recursive)
+      fprintf(stderr, "katzip: archive is an input file: %s\n", path);
+    return recursive ? 1 : -1;
   }
   for(i = 0; i < list->count; ++i)
   {
     if(strcmp(name, list->entries[i].name) == 0)
     {
-      if(recursive)
-        return 0;
-      fprintf(stderr, "katzip: duplicate entry: %s\n", name);
-      return -1;
+      if(!recursive)
+        fprintf(stderr, "katzip: duplicate entry: %s\n", name);
+      return recursive ? 1 : -1;
     }
   }
+  return 0;
+}
+
+static int reserve_entry(ENTRY_LIST *list)
+{
+  ENTRY *grown;
+  size_t capacity;
   if(list->count == UINT16_MAX)
   {
     fprintf(stderr, "katzip: too many files\n");
     return -1;
   }
-  if(list->count == list->capacity)
+  if(list->count < list->capacity)
+    return 0;
+  capacity = list->capacity ? list->capacity * 2 : 16;
+  if(capacity > UINT16_MAX)
+    capacity = UINT16_MAX;
+  grown = realloc(list->entries, capacity * sizeof(*grown));
+  if(!grown)
   {
-    capacity = list->capacity ? list->capacity * 2 : 16;
-    if(capacity > UINT16_MAX)
-      capacity = UINT16_MAX;
-    grown = realloc(list->entries, capacity * sizeof(*grown));
-    if(!grown)
-    {
-      fprintf(stderr, "katzip: out of memory\n");
-      return -1;
-    }
-    list->entries = grown;
-    list->capacity = capacity;
+    fprintf(stderr, "katzip: out of memory\n");
+    return -1;
   }
-  entry = &list->entries[list->count];
+  list->entries = grown;
+  list->capacity = capacity;
+  return 0;
+}
+
+static int append_entry(ENTRY_LIST *list, const char *path,
+  const char *name, const struct stat *file_stat)
+{
+  ENTRY *entry = &list->entries[list->count];
   memset(entry, 0, sizeof(*entry));
   entry->path = copy_text(path);
   entry->name = copy_text(name);
@@ -1002,11 +1184,28 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
   }
   entry->name_len = (uint16_t)strlen(name);
   entry->flags = (uint16_t)(valid_utf8(name) ? MZ_ZIP_FLAG_UTF8 : 0);
-  entry->mode = (uint32_t)file_stat.st_mode;
-  entry->expected_size = (uint32_t)file_stat.st_size;
-  entry->mtime = file_stat.st_mtime;
+  entry->mode = (uint32_t)file_stat->st_mode;
+  entry->expected_size = (uint32_t)file_stat->st_size;
+  entry->mtime = file_stat->st_mtime;
   ++list->count;
   return 0;
+}
+
+static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
+{
+  const char *name = path;
+  struct stat file_stat;
+  int duplicate;
+  while(name[0] == '.' && name[1] == '/')
+    name += 2;
+  if(inspect_input(path, name, &file_stat))
+    return -1;
+  duplicate = already_added(list, path, name, &file_stat, recursive);
+  if(duplicate)
+    return duplicate < 0 ? -1 : 0;
+  if(reserve_entry(list))
+    return -1;
+  return append_entry(list, path, name, &file_stat);
 }
 
 static char *join_path(const char *directory, const char *name)
@@ -1025,7 +1224,8 @@ static char *join_path(const char *directory, const char *name)
   return path;
 }
 
-static int matches_masks(const char **masks, size_t count, const char *relative, const char *basename)
+static int matches_masks(const char **masks, size_t count,
+  const char *relative, const char *basename)
 {
   size_t i;
   if(!count)
@@ -1043,7 +1243,9 @@ static int matches_masks(const char **masks, size_t count, const char *relative,
   return 0;
 }
 
-static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char **masks, size_t mask_count, int recursive)
+static int walk_directory(ENTRY_LIST *list, const char *directory,
+  const char *root, const char **masks, size_t mask_count,
+  int recursive)
 {
   DIR *stream = opendir(directory);
   struct dirent *item;
@@ -1096,7 +1298,8 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
   return status;
 }
 
-static int add_argument(ENTRY_LIST *list, const char *argument, int recursive, const char **masks, size_t mask_count)
+static int add_argument(ENTRY_LIST *list, const char *argument,
+  int recursive, const char **masks, size_t mask_count)
 {
   const char *name = argument;
   const char *base;
@@ -1157,281 +1360,399 @@ static void print_help(FILE *stream)
     "Example: katzip APPNOTE APPNOTE.TXT\n", stream);
 }
 
-int main(int argc, char **argv)
-{
-  ENTRY_LIST list;
+typedef struct {
+  int level;
+  int recursive;
+  int archive_arg;
+} OPTIONS;
+
+typedef struct {
+  char *temporary_path;
+  void *writer;
+  void *zip;
+  void *reader;
   PROGRESS progress;
-  void *writer = NULL;
-  void *zip = NULL;
-  void *reader = NULL;
-  FILE *in;
-  char *archive_path;
-  char *temporary_path = NULL;
-  const char **masks = NULL;
-  size_t mask_count = 0;
-  turtledeflate_config_t config;
-  int fast_level = 0;
-  int archive_arg = 1;
-  int level = 7;
-  int recursive = 0;
-  int source_count = 0;
-  int progress_ready = 0;
-  int handlers_active = 0;
-  struct sigaction action;
+  int progress_ready;
+  int temporary_created;
+  int handlers_active;
   struct sigaction previous_int;
   struct sigaction previous_term;
-  sigset_t startup_mask;
-  sigset_t startup_previous_mask;
-  int error_number;
-  struct stat output_stat;
-  mode_t output_mode;
-  mode_t process_umask;
-  uint64_t expected_archive_size = 22;
-  int i;
-  int status = 1;
+  sigset_t interrupt_mask;
+} ARCHIVE_OUTPUT;
 
-  while(archive_arg < argc && argv[archive_arg][0] == '-')
+/* A positive result means a help or defaults request was handled. */
+static int parse_options(int argc, char **argv, OPTIONS *options)
+{
+  options->level = 7;
+  options->recursive = 0;
+  options->archive_arg = 1;
+  while(options->archive_arg < argc &&
+    argv[options->archive_arg][0] == '-')
   {
-    if(strcmp(argv[archive_arg], "--print-default-ini") == 0)
+    const char *argument = argv[options->archive_arg];
+    if(strcmp(argument, "--print-default-ini") == 0)
     {
-      if(fputs(katzip_default_ini, stdout) == EOF || fflush(stdout) == EOF)
+      if(fputs(katzip_default_ini, stdout) == EOF ||
+        fflush(stdout) == EOF)
       {
         fprintf(stderr, "katzip: cannot write default settings\n");
-        return 1;
+        return -1;
       }
-      return 0;
-    }
-    if(strcmp(argv[archive_arg], "--help") == 0 || strcmp(argv[archive_arg], "-h") == 0)
-    {
-      print_help(stdout);
-      return 0;
-    }
-    if(strcmp(argv[archive_arg], "--") == 0)
-    {
-      ++archive_arg;
-      break;
-    }
-    if(strcmp(argv[archive_arg], "-r") == 0)
-      recursive = 1;
-    else if(argv[archive_arg][1] >= '1' && argv[archive_arg][1] <= '9' && !argv[archive_arg][2])
-      level = argv[archive_arg][1] - '0';
-    else
-    {
-      fprintf(stderr, "katzip: unknown option: %s\n", argv[archive_arg]);
       return 1;
     }
-    ++archive_arg;
+    if(strcmp(argument, "--help") == 0 ||
+      strcmp(argument, "-h") == 0)
+    {
+      print_help(stdout);
+      return 1;
+    }
+    if(strcmp(argument, "--") == 0)
+    {
+      ++options->archive_arg;
+      break;
+    }
+    if(strcmp(argument, "-r") == 0)
+      options->recursive = 1;
+    else if(argument[1] >= '1' && argument[1] <= '9' &&
+      !argument[2])
+      options->level = argument[1] - '0';
+    else
+    {
+      fprintf(stderr, "katzip: unknown option: %s\n", argument);
+      return -1;
+    }
+    ++options->archive_arg;
   }
-  if(argc <= archive_arg)
+  if(options->archive_arg == argc)
   {
     print_help(stderr);
-    return 1;
+    return -1;
   }
-  if(load_config(argv[0], level, &config, &fast_level))
-    return 1;
-  archive_path = archive_name(argv[archive_arg]);
+  return 0;
+}
+
+/* Read masks before visiting explicit files or directories. */
+static int collect_entries(ENTRY_LIST *list, int argc, char **argv,
+  const OPTIONS *options)
+{
+  const char **masks = calloc((size_t)argc, sizeof(*masks));
+  size_t mask_count = 0;
+  int source_count = 0;
+  int result = 0;
+  int i;
+  if(!masks)
+  {
+    fprintf(stderr, "katzip: out of memory\n");
+    return -1;
+  }
+  for(i = options->archive_arg + 1; i < argc; ++i)
+  {
+    if(argv[i][0] != '@')
+    {
+      ++source_count;
+      continue;
+    }
+    if(!argv[i][1])
+    {
+      fprintf(stderr, "katzip: empty file mask\n");
+      result = -1;
+      break;
+    }
+    masks[mask_count++] = argv[i] + 1;
+  }
+  if(!result && !source_count)
+  {
+    if(!mask_count)
+      masks[mask_count++] = "*";
+    result = walk_directory(list, ".", ".", masks,
+      mask_count, options->recursive);
+  }
+  for(i = options->archive_arg + 1; !result && i < argc; ++i)
+  {
+    if(argv[i][0] != '@')
+      result = add_argument(list, argv[i], options->recursive,
+        masks, mask_count);
+  }
+  free(masks);
+  if(!result && !list->count)
+  {
+    fprintf(stderr, "katzip: no files to archive\n");
+    return -1;
+  }
+  return result;
+}
+
+static mode_t archive_mode(const ENTRY_LIST *list)
+{
+  mode_t process_umask = umask(0);
+  umask(process_umask);
+  if(list->archive_exists)
+    return list->archive_stat.st_mode & 0777;
+  return 0666 & ~process_umask;
+}
+
+/* Signals stay blocked between creating the file and installing cleanup. */
+static int install_interrupt_handlers(ARCHIVE_OUTPUT *output)
+{
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = remove_temp_on_signal;
+  sigemptyset(&action.sa_mask);
+  signal_temp_path = output->temporary_path;
+  if(sigaction(SIGINT, &action, &output->previous_int))
+  {
+    signal_temp_path = NULL;
+    return -1;
+  }
+  if(sigaction(SIGTERM, &action, &output->previous_term))
+  {
+    int saved_error = errno;
+    sigaction(SIGINT, &output->previous_int, NULL);
+    signal_temp_path = NULL;
+    errno = saved_error;
+    return -1;
+  }
+  output->handlers_active = 1;
+  return 0;
+}
+
+static int create_temporary_archive(ARCHIVE_OUTPUT *output,
+  const char *archive_path)
+{
+  sigset_t previous_mask;
+  int file;
+  int saved_error;
+  output->temporary_path = malloc(strlen(archive_path) +
+    sizeof(".tmp.XXXXXX"));
+  if(!output->temporary_path)
+  {
+    fprintf(stderr, "katzip: out of memory\n");
+    return -1;
+  }
+  sprintf(output->temporary_path, "%s.tmp.XXXXXX", archive_path);
+  sigemptyset(&output->interrupt_mask);
+  sigaddset(&output->interrupt_mask, SIGINT);
+  sigaddset(&output->interrupt_mask, SIGTERM);
+  if(sigprocmask(SIG_BLOCK, &output->interrupt_mask,
+    &previous_mask))
+  {
+    fprintf(stderr, "katzip: cannot block interrupts: %s\n",
+      strerror(errno));
+    return -1;
+  }
+  file = mkstemp(output->temporary_path);
+  if(file < 0)
+  {
+    saved_error = errno;
+    sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+    fprintf(stderr, "katzip: cannot create temporary archive: %s\n",
+      strerror(saved_error));
+    return -1;
+  }
+  output->temporary_created = 1;
+  if(install_interrupt_handlers(output))
+  {
+    saved_error = errno;
+    close(file);
+    sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+    fprintf(stderr, "katzip: cannot handle interrupts: %s\n",
+      strerror(saved_error));
+    return -1;
+  }
+  sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+  if(close(file))
+  {
+    fprintf(stderr, "katzip: cannot close temporary archive: %s\n",
+      strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+static void restore_signal_handlers(ARCHIVE_OUTPUT *output)
+{
+  sigset_t previous_mask;
+  if(!output->handlers_active)
+    return;
+  sigprocmask(SIG_BLOCK, &output->interrupt_mask, &previous_mask);
+  sigaction(SIGINT, &output->previous_int, NULL);
+  sigaction(SIGTERM, &output->previous_term, NULL);
+  signal_temp_path = NULL;
+  sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+}
+
+static void finish_archive_output(ARCHIVE_OUTPUT *output)
+{
+  if(output->reader)
+    mz_zip_reader_delete(&output->reader);
+  if(output->writer)
+    mz_zip_writer_delete(&output->writer);
+  if(output->progress_ready)
+    progress_destroy(&output->progress);
+  restore_signal_handlers(output);
+  if(output->temporary_created)
+    remove(output->temporary_path);
+  free(output->temporary_path);
+}
+
+static int write_archive_entries(ARCHIVE_OUTPUT *output,
+  ENTRY_LIST *list, const OPTIONS *options,
+  const turtledeflate_config_t *config, int fast_level)
+{
+  size_t i;
+  output->writer = mz_zip_writer_create();
+  if(!output->writer || mz_zip_writer_open_file(output->writer,
+    output->temporary_path, 0, 0) != MZ_OK ||
+    mz_zip_writer_get_zip_handle(output->writer,
+      &output->zip) != MZ_OK)
+    return -1;
+  for(i = 0; i < list->count; ++i)
+  {
+    FILE *in = fopen(list->entries[i].path, "rb");
+    int result;
+    if(!in)
+    {
+      fprintf(stderr, "katzip: cannot archive %s\n",
+        list->entries[i].path);
+      return -1;
+    }
+    if(options->level < 7)
+      result = write_fast_entry(output->zip, &list->entries[i], in,
+        fast_level, zip_level_hint(options->level), &output->progress);
+    else
+      result = write_entry(output->zip, &list->entries[i], in,
+        config, &output->progress);
+    if(fclose(in))
+      result = -1;
+    if(result)
+    {
+      fprintf(stderr, "katzip: cannot archive %s\n",
+        list->entries[i].path);
+      return -1;
+    }
+  }
+  if(mz_zip_writer_close(output->writer) != MZ_OK)
+    return -1;
+  mz_zip_writer_delete(&output->writer);
+  return 0;
+}
+
+/* Check the exact metadata size and ask minizip-ng to read the result. */
+static int validate_archive(ARCHIVE_OUTPUT *output,
+  const ENTRY_LIST *list)
+{
+  struct stat output_stat;
+  uint64_t expected_size = 22;
+  size_t i;
+  for(i = 0; i < list->count; ++i)
+  {
+    expected_size += list->entries[i].compressed_size + 76 +
+      2 * list->entries[i].name_len;
+  }
+  if(expected_size > UINT32_MAX ||
+    stat(output->temporary_path, &output_stat) ||
+    output_stat.st_size < 0 ||
+    (uint64_t)output_stat.st_size != expected_size)
+  {
+    errno = EIO;
+    return -1;
+  }
+  output->reader = mz_zip_reader_create();
+  if(!output->reader || mz_zip_reader_open_file(output->reader,
+    output->temporary_path) != MZ_OK)
+  {
+    errno = EIO;
+    return -1;
+  }
+  mz_zip_reader_delete(&output->reader);
+  return 0;
+}
+
+/* Publish only a complete archive, preserving an existing output on error. */
+static int publish_archive(ARCHIVE_OUTPUT *output,
+  const char *archive_path, mode_t mode)
+{
+  int file = open(output->temporary_path, O_RDONLY);
+  int result;
+  int saved_error;
+  if(file < 0)
+    return -1;
+  result = fchmod(file, mode);
+  if(!result)
+    result = fsync(file);
+  saved_error = errno;
+  if(close(file) && !result)
+  {
+    result = -1;
+    saved_error = errno;
+  }
+  if(result)
+  {
+    errno = saved_error;
+    return -1;
+  }
+  if(rename(output->temporary_path, archive_path))
+    return -1;
+  output->temporary_created = 0;
+  return 0;
+}
+
+static int run_archive(int argc, char **argv, const OPTIONS *options,
+  const turtledeflate_config_t *config, int fast_level)
+{
+  ENTRY_LIST list = {0};
+  ARCHIVE_OUTPUT output = {0};
+  char *archive_path = archive_name(argv[options->archive_arg]);
+  mode_t mode;
+  int result;
   if(!archive_path)
   {
     fprintf(stderr, "katzip: invalid archive name\n");
     return 1;
   }
-  memset(&list, 0, sizeof(list));
   list.archive_exists = stat(archive_path, &list.archive_stat) == 0;
-  process_umask = umask(0);
-  umask(process_umask);
-  output_mode = list.archive_exists ? list.archive_stat.st_mode & 0777 : 0666 & ~process_umask;
-  masks = calloc((size_t)argc, sizeof(*masks));
-  if(!masks)
+  mode = archive_mode(&list);
+  result = collect_entries(&list, argc, argv, options);
+  if(!result)
+    result = create_temporary_archive(&output, archive_path);
+  if(!result)
   {
-    fprintf(stderr, "katzip: out of memory\n");
-    goto done;
-  }
-  for(i = archive_arg + 1; i < argc; ++i)
-  {
-    if(argv[i][0] == '@')
-    {
-      if(!argv[i][1])
-      {
-        fprintf(stderr, "katzip: empty file mask\n");
-        goto done;
-      }
-      masks[mask_count++] = argv[i] + 1;
-    }
+    result = progress_init(&output.progress);
+    if(result)
+      fprintf(stderr, "katzip: cannot start progress display\n");
     else
-      ++source_count;
+      output.progress_ready = 1;
   }
-  if(!source_count)
+  if(!result)
   {
-    if(!mask_count)
-      masks[mask_count++] = "*";
-    if(walk_directory(&list, ".", ".", masks, mask_count, recursive))
-      goto done;
-  }
-  for(i = archive_arg + 1; i < argc; ++i)
-  {
-    if(argv[i][0] == '@')
-      continue;
-    if(add_argument(&list, argv[i], recursive, masks, mask_count))
-      goto done;
-  }
-  if(!list.count)
-  {
-    fprintf(stderr, "katzip: no files to archive\n");
-    goto done;
-  }
-  temporary_path = malloc(strlen(archive_path) + sizeof(".tmp.XXXXXX"));
-  if(!temporary_path)
-  {
-    fprintf(stderr, "katzip: out of memory\n");
-    goto done;
-  }
-  sprintf(temporary_path, "%s.tmp.XXXXXX", archive_path);
-  sigemptyset(&startup_mask);
-  sigaddset(&startup_mask, SIGINT);
-  sigaddset(&startup_mask, SIGTERM);
-  if(sigprocmask(SIG_BLOCK, &startup_mask, &startup_previous_mask))
-  {
-    fprintf(stderr, "katzip: cannot block interrupts: %s\n", strerror(errno));
-    goto done;
-  }
-  i = mkstemp(temporary_path);
-  if(i < 0)
-  {
-    error_number = errno;
-    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
-    fprintf(stderr, "katzip: cannot create temporary archive: %s\n", strerror(error_number));
-    goto done;
-  }
-  memset(&action, 0, sizeof(action));
-  action.sa_handler = remove_temp_on_signal;
-  sigemptyset(&action.sa_mask);
-  signal_temp_path = temporary_path;
-  if(sigaction(SIGINT, &action, &previous_int))
-  {
-    error_number = errno;
-    close(i);
-    unlink(temporary_path);
-    signal_temp_path = NULL;
-    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
-    fprintf(stderr, "katzip: cannot handle interrupts: %s\n", strerror(error_number));
-    goto done;
-  }
-  if(sigaction(SIGTERM, &action, &previous_term))
-  {
-    error_number = errno;
-    sigaction(SIGINT, &previous_int, NULL);
-    close(i);
-    unlink(temporary_path);
-    signal_temp_path = NULL;
-    sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
-    fprintf(stderr, "katzip: cannot handle interrupts: %s\n", strerror(error_number));
-    goto done;
-  }
-  handlers_active = 1;
-  sigprocmask(SIG_SETMASK, &startup_previous_mask, NULL);
-  if(close(i))
-  {
-    error_number = errno;
-    goto remove_temp;
-  }
-  if(progress_init(&progress))
-  {
-    fprintf(stderr, "katzip: cannot start progress display\n");
-    error_number = EAGAIN;
-    goto remove_temp;
-  }
-  progress_ready = 1;
-  writer = mz_zip_writer_create();
-  if(!writer || mz_zip_writer_open_file(writer, temporary_path, 0, 0) != MZ_OK ||
-    mz_zip_writer_get_zip_handle(writer, &zip) != MZ_OK)
-    goto output_error;
-  for(i = 0; i < (int)list.count; ++i)
-  {
-    in = fopen(list.entries[i].path, "rb");
-    if(!in || (level < 7 ? write_fast_entry(zip, &list.entries[i], in, fast_level, zip_level_hint(level), &progress) :
-      write_entry(zip, &list.entries[i], in, &config, &progress)))
+    result = write_archive_entries(&output, &list, options,
+      config, fast_level);
+    if(!result)
+      result = validate_archive(&output, &list);
+    if(!result)
+      result = publish_archive(&output, archive_path, mode);
+    if(result)
     {
-      fprintf(stderr, "katzip: cannot archive %s\n", list.entries[i].path);
-      if(in)
-        fclose(in);
-      goto output_error;
+      int error_number = errno ? errno : EIO;
+      fprintf(stderr, "katzip: failed to write archive %s: %s\n",
+        archive_path, strerror(error_number));
     }
-    if(fclose(in))
-      goto output_error;
   }
-  if(mz_zip_writer_close(writer) != MZ_OK)
-    goto output_error;
-  mz_zip_writer_delete(&writer);
-  for(i = 0; i < (int)list.count; ++i)
-    expected_archive_size += list.entries[i].compressed_size + 76 + 2 * list.entries[i].name_len;
-  if(expected_archive_size > UINT32_MAX || stat(temporary_path, &output_stat) || output_stat.st_size < 0 ||
-    (uint64_t)output_stat.st_size != expected_archive_size)
-  {
-    errno = EIO;
-    goto output_error;
-  }
-  reader = mz_zip_reader_create();
-  if(!reader || mz_zip_reader_open_file(reader, temporary_path) != MZ_OK)
-  {
-    errno = EIO;
-    goto output_error;
-  }
-  mz_zip_reader_delete(&reader);
-  i = open(temporary_path, O_RDONLY);
-  if(i < 0)
-  {
-    error_number = errno;
-    goto remove_temp;
-  }
-  if(fchmod(i, output_mode))
-  {
-    error_number = errno;
-    close(i);
-    goto remove_temp;
-  }
-  if(fsync(i))
-  {
-    error_number = errno;
-    close(i);
-    goto remove_temp;
-  }
-  if(close(i))
-  {
-    error_number = errno;
-    goto remove_temp;
-  }
-  if(rename(temporary_path, archive_path))
-  {
-    error_number = errno;
-    goto remove_temp;
-  }
-  status = 0;
-  goto done;
-
-output_error:
-  error_number = errno ? errno : EIO;
-remove_temp:
-  if(reader)
-    mz_zip_reader_delete(&reader);
-  if(writer)
-    mz_zip_writer_delete(&writer);
-  fprintf(stderr, "katzip: failed to write archive %s: %s\n", archive_path, strerror(error_number));
-  remove(temporary_path);
-done:
-  if(progress_ready)
-    progress_destroy(&progress);
-  if(handlers_active)
-  {
-    sigset_t previous_mask;
-    sigprocmask(SIG_BLOCK, &startup_mask, &previous_mask);
-    sigaction(SIGINT, &previous_int, NULL);
-    sigaction(SIGTERM, &previous_term, NULL);
-    signal_temp_path = NULL;
-    sigprocmask(SIG_SETMASK, &previous_mask, NULL);
-  }
+  finish_archive_output(&output);
   free_entries(&list);
-  free(masks);
-  free(temporary_path);
   free(archive_path);
-  return status;
+  return result ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+  OPTIONS options;
+  turtledeflate_config_t config;
+  int fast_level = 0;
+  int result = parse_options(argc, argv, &options);
+  if(result)
+    return result < 0 ? 1 : 0;
+  if(load_config(argv[0], options.level, &config, &fast_level))
+    return 1;
+  return run_archive(argc, argv, &options, &config, fast_level);
 }

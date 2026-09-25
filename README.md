@@ -111,6 +111,21 @@ For normal files it uses 16 fewer ZIP metadata bytes per entry than the
 previous container writer. `make test` checks that metadata size and validates
 each archive before an existing output is replaced.
 
+## Reading the source
+
+The program follows a short pipeline in `main`: parse options, load one
+compression preset, then run the archive operation. `collect_entries` builds
+the input list. `write_archive_entries` chooses libdeflate or zlib for levels
+1-6 and Turtledeflate for levels 7-9; level 9 also compares ECT's result.
+`validate_archive` checks the exact ZIP size and reopens the temporary file.
+`publish_archive` changes its permissions, flushes it, then replaces the output.
+
+Resources belong to the function or context that creates them. `TURTLE_WORK`
+owns Turtledeflate's buffers, compressor, temporary stream and optional ECT
+thread. `ARCHIVE_OUTPUT` owns the temporary archive, ZIP reader and writer,
+progress thread and signal handlers. The corresponding cleanup functions run
+on both success and failure. Third-party sources remain unchanged.
+
 ## Third-party code
 
 The system libdeflate library provides fast raw DEFLATE compression at levels

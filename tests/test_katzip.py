@@ -230,6 +230,26 @@ class KatzipTests(unittest.TestCase):
             self.assertIn(b"invalid settings", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
 
+    def test_invalid_ini_line_after_valid_settings_is_rejected(self):
+        (self.root / "input.txt").write_text("data")
+        config = self.root / "broken.ini"
+        defaults = subprocess.run(
+            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
+        ).stdout.decode()
+        environment = dict(os.environ, KATZIP_INI=str(config))
+        broken_configs = (
+            defaults.replace("[libdeflate-2]", "bad = 1\n[libdeflate-2]", 1),
+            defaults + "[libdeflate-1]\nlevel = 1",
+        )
+        for content in broken_configs:
+            config.write_text(content)
+            result = self.run_katzip(
+                "-1", "archive", "input.txt", env=environment
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"invalid setting", result.stderr)
+            self.assertFalse((self.root / "archive.zip").exists())
+
     def test_ini_search_order_and_embedded_levels(self):
         binary_dir = self.root / "bin"
         document_dir = self.root / "documents"
