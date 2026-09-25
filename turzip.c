@@ -1,4 +1,6 @@
+#include <ctype.h>
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,8 +9,6 @@
 #include <time.h>
 
 #include "turtledeflate_api.h"
-
-enum { BLOCK_SIZE = 32768 };
 
 typedef struct {
   const char *path;
@@ -31,14 +31,12 @@ typedef struct {
 } OUTPUT;
 
 typedef struct {
-  int subblocks;
-  int split_iterations;
-  int internal_iterations;
-  int points;
-  int starts;
-  int min_fp;
-  int max_fp;
-} PRESET;
+  const char *name;
+  size_t offset;
+  int boolean;
+} CONFIG_FIELD;
+
+#define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
 
 static int write_bytes(OUTPUT *out, const void *data, size_t size)
 {
@@ -213,41 +211,178 @@ static int write_end(OUTPUT *out, uint16_t count, uint32_t central_offset, uint3
     write_u16(out, 0) ? -1 : 0;
 }
 
-static turtledeflate_config_t compression_config(int level)
+static char *trim(char *text)
 {
-  static const PRESET presets[9] = {
-    {1, 1, 1, 3, 2, -3, 1},
-    {2, 1, 1, 3, 2, -3, 1},
-    {2, 1, 2, 5, 2, -3, 1},
-    {4, 1, 2, 5, 3, -3, 1},
-    {4, 2, 3, 7, 3, -3, 1},
-    {8, 2, 3, 7, 3, -3, 1},
-    {8, 2, 4, 7, 3, -3, 1},
-    {16, 4, 10, 15, 6, -4, 3},
-    {32, 8, 24, 31, 10, -6, 5}
-  };
-  const PRESET *preset = &presets[level - 1];
-  turtledeflate_config_t config;
-  memset(&config, 0, sizeof(config));
-  config.i_compression_level = level;
-  config.i_maximum_block_size = BLOCK_SIZE;
-  config.i_maximum_subblocks = preset->subblocks;
-  config.i_max_block_splitter_iterations = preset->split_iterations;
-  config.i_max_internal_block_splitter_iterations = preset->internal_iterations;
-  config.i_block_splitter_num_points = preset->points;
-  config.i_block_splitter_center_dist = preset->points / 4 + 1;
-  config.i_block_splitter_min_range_for_points = 1024;
-  config.i_min_start_fp = preset->min_fp;
-  config.i_max_start_fp = preset->max_fp;
-  config.i_num_start_fp = preset->starts;
-  return config;
+  size_t size;
+  while(isspace((unsigned char)*text))
+    ++text;
+  size = strlen(text);
+  while(size && isspace((unsigned char)text[size - 1]))
+    text[--size] = 0;
+  return text;
 }
 
-static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, int level)
+static char *config_path(const char *program)
 {
-  unsigned char buffer[BLOCK_SIZE];
+  const char *override = getenv("TURZIP_INI");
+  const char *slash;
+  const char *name = "turzip.ini";
+  char *path;
+  size_t prefix;
+  if(override && *override)
+  {
+    path = malloc(strlen(override) + 1);
+    if(path)
+      strcpy(path, override);
+    return path;
+  }
+  slash = strrchr(program, '/');
+  prefix = slash ? (size_t)(slash - program + 1) : 0;
+  path = malloc(prefix + strlen(name) + 1);
+  if(path)
+  {
+    memcpy(path, program, prefix);
+    strcpy(path + prefix, name);
+  }
+  return path;
+}
+
+static int valid_config(const turtledeflate_config_t *config, int level)
+{
+  return config->i_compression_level == level &&
+    config->i_maximum_block_size >= TURTLEDEFLATE_MIN_BLOCK_SIZE &&
+    config->i_maximum_block_size <= INT32_MAX / 3 &&
+    config->i_maximum_subblocks >= TURTLEDEFLATE_MIN_SUBBLOCKS &&
+    config->i_maximum_subblocks <= TURTLEDEFLATE_MAX_SUBBLOCKS &&
+    config->i_max_block_splitter_iterations > 0 &&
+    config->i_max_internal_block_splitter_iterations > 0 &&
+    config->i_block_splitter_num_points > 0 &&
+    config->i_block_splitter_num_points <= TURTLEDEFLATE_BSPLIT_MAX_NUM_POINTS &&
+    config->i_block_splitter_center_dist > 0 &&
+    config->i_block_splitter_center_dist <= config->i_block_splitter_num_points &&
+    config->i_block_splitter_min_range_for_points > 0 &&
+    config->i_min_start_fp <= config->i_max_start_fp &&
+    config->i_num_start_fp >= 2 &&
+    config->i_num_start_fp <= TURTLEDEFLATE_MAX_NUM_FP_START / 2 &&
+    config->i_verbose >= TURTLEDEFLATE_VERBOSE_NONE &&
+    config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
+}
+
+static int load_config(const char *program, int level, turtledeflate_config_t *config)
+{
+  static const CONFIG_FIELD fields[] = {
+    {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
+    {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
+    {"i_maximum_subblocks", offsetof(turtledeflate_config_t, i_maximum_subblocks), 0},
+    {"i_max_block_splitter_iterations", offsetof(turtledeflate_config_t, i_max_block_splitter_iterations), 0},
+    {"i_max_internal_block_splitter_iterations", offsetof(turtledeflate_config_t, i_max_internal_block_splitter_iterations), 0},
+    {"i_block_splitter_num_points", offsetof(turtledeflate_config_t, i_block_splitter_num_points), 0},
+    {"i_block_splitter_center_dist", offsetof(turtledeflate_config_t, i_block_splitter_center_dist), 0},
+    {"i_block_splitter_min_range_for_points", offsetof(turtledeflate_config_t, i_block_splitter_min_range_for_points), 0},
+    {"b_block_splitter_push_split", offsetof(turtledeflate_config_t, b_block_splitter_push_split), 1},
+    {"i_min_start_fp", offsetof(turtledeflate_config_t, i_min_start_fp), 0},
+    {"i_max_start_fp", offsetof(turtledeflate_config_t, i_max_start_fp), 0},
+    {"i_num_start_fp", offsetof(turtledeflate_config_t, i_num_start_fp), 0},
+    {"i_verbose", offsetof(turtledeflate_config_t, i_verbose), 0}
+  };
+  char section[32];
+  char line[256];
+  char *path = config_path(program);
+  char *key;
+  char *value;
+  char *end;
+  FILE *file;
+  uint32_t seen = 0;
+  long number;
+  size_t i;
+  int active = 0;
+  int found = 0;
+  int line_number = 0;
+  int status = -1;
+  if(!path)
+  {
+    fprintf(stderr, "turzip: out of memory\n");
+    return -1;
+  }
+  file = fopen(path, "r");
+  if(!file)
+  {
+    fprintf(stderr, "turzip: cannot open %s: %s\n", path, strerror(errno));
+    free(path);
+    return -1;
+  }
+  snprintf(section, sizeof(section), "[turtledeflate-%d]", level);
+  memset(config, 0, sizeof(*config));
+  while(fgets(line, sizeof(line), file))
+  {
+    ++line_number;
+    if(!strchr(line, '\n') && !feof(file))
+      goto bad_line;
+    key = trim(line);
+    if(!*key || *key == '#' || *key == ';')
+      continue;
+    if(*key == '[')
+    {
+      active = strcmp(key, section) == 0;
+      if(active && found++)
+        goto bad_line;
+      continue;
+    }
+    if(!active)
+      continue;
+    value = strchr(key, '=');
+    if(!value)
+      goto bad_line;
+    *value++ = 0;
+    key = trim(key);
+    value = trim(value);
+    errno = 0;
+    number = strtol(value, &end, 10);
+    if(!*value || *end || errno == ERANGE || number < INT32_MIN || number > INT32_MAX)
+      goto bad_line;
+    for(i = 0; i < ARRAY_N(fields); ++i)
+    {
+      if(strcmp(key, fields[i].name) == 0)
+        break;
+    }
+    if(i == ARRAY_N(fields) || (seen & (UINT32_C(1) << i)))
+      goto bad_line;
+    if(fields[i].boolean)
+    {
+      if(number != 0 && number != 1)
+        goto bad_line;
+      *(bool*)((unsigned char*)config + fields[i].offset) = number != 0;
+    }
+    else
+      *(int32_t*)((unsigned char*)config + fields[i].offset) = (int32_t)number;
+    seen |= UINT32_C(1) << i;
+  }
+  if(ferror(file))
+  {
+    fprintf(stderr, "turzip: cannot read %s\n", path);
+    goto done;
+  }
+  if(!found || seen != (UINT32_C(1) << ARRAY_N(fields)) - 1 || !valid_config(config, level))
+  {
+    fprintf(stderr, "turzip: missing or invalid settings in %s %s\n", path, section);
+    goto done;
+  }
+  status = 0;
+  goto done;
+
+bad_line:
+  fprintf(stderr, "turzip: invalid setting in %s:%d\n", path, line_number);
+done:
+  fclose(file);
+  free(path);
+  return status;
+}
+
+static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_config_t *config)
+{
+  unsigned char *buffer;
   unsigned char *compressed;
-  turtledeflate_config_t config = compression_config(level);
+  turtledeflate_config_t compressor_config = *config;
   void *compressor = NULL;
   uint64_t start;
   uint32_t crc = UINT32_MAX;
@@ -256,18 +391,23 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, int level)
   int compressed_size;
   int percent;
   int last_percent = 0;
+  int progress_started = 0;
   int status = -1;
 
+  buffer = malloc((size_t)config->i_maximum_block_size);
+  if(!buffer)
+    return -1;
   entry->offset = (uint32_t)out->offset;
   if(write_local_header(out, entry))
-    return -1;
+    goto done;
   start = out->offset;
-  size = fread(buffer, 1, sizeof(buffer), in);
+  size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
   if(ferror(in))
-    return -1;
-  if(size && !turtledeflate_create(&compressor, &config))
-    return -1;
+    goto done;
+  if(size && !turtledeflate_create(&compressor, &compressor_config))
+    goto done;
   show_progress(entry, 0);
+  progress_started = 1;
   while(size)
   {
     next = fgetc(in);
@@ -292,7 +432,7 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, int level)
     }
     if(next == EOF)
       break;
-    size = fread(buffer, 1, sizeof(buffer), in);
+    size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
     if(!size || ferror(in))
       goto done;
   }
@@ -311,9 +451,13 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, int level)
 done:
   if(compressor)
     turtledeflate_destroy(compressor);
-  if(status == 0 && last_percent < 100)
-    show_progress(entry, 100);
-  fputc('\n', stderr);
+  free(buffer);
+  if(progress_started)
+  {
+    if(status == 0 && last_percent < 100)
+      show_progress(entry, 100);
+    fputc('\n', stderr);
+  }
   return status;
 }
 
@@ -326,6 +470,7 @@ int main(int argc, char **argv)
   FILE *in;
   uint32_t central_offset;
   uint32_t central_size;
+  turtledeflate_config_t config;
   int archive_arg = 1;
   int file_arg;
   int level = 7;
@@ -349,6 +494,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "usage: turzip [-1..-9] archive_name file[s]\n");
     return 1;
   }
+  if(load_config(argv[0], level, &config))
+    return 1;
   entries = calloc((size_t)(argc - file_arg), sizeof(*entries));
   if(!entries)
   {
@@ -399,7 +546,7 @@ int main(int argc, char **argv)
   for(i = 0; i < argc - file_arg; ++i)
   {
     in = fopen(entries[i].path, "rb");
-    if(!in || write_entry(&out, &entries[i], in, level))
+    if(!in || write_entry(&out, &entries[i], in, &config))
     {
       fprintf(stderr, "turzip: cannot archive %s\n", entries[i].path);
       if(in)

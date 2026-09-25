@@ -6,6 +6,7 @@ each file. The program is written in C99.
 ## Build
 
 Run `make`. This creates `./turzip`. You need a C compiler and `make`.
+Keep `turzip.ini` next to the executable.
 
 ## Use
 
@@ -17,7 +18,16 @@ Run `make`. This creates `./turzip`. You need a C compiler and `make`.
 An optional `-1` to `-9` flag sets the compression level before the output path.
 Level 1 uses the least compression work, and level 9 uses the most. The default
 is level 7. A higher level can take much longer and does not always make a
-smaller archive.
+smaller archive. Level 9 uses the same compression settings and 1,000,000-byte
+input blocks as `turtledeflate --9`. It can use much more memory than the other
+levels. ZIP headers still add their own bytes to the archive.
+
+All Turtledeflate settings come from `turzip.ini`. Each level has a section from
+`[turtledeflate-1]` through `[turtledeflate-9]`. You can edit the values before
+running turzip. If you call the program without a path, it looks for the INI file
+in the current directory. Set `TURZIP_INI` to use a file at another path.
+turzip stops with an error if the selected section or a required setting is
+missing or invalid.
 
 The output path is used exactly as given, so add
 `.zip` yourself if you want that extension. Each later argument is a file to
