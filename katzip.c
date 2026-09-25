@@ -81,6 +81,7 @@ typedef struct {
   size_t input_size;
   size_t output_size;
   uint32_t crc;
+  int mode;
   int started;
 } ECT_JOB;
 
@@ -92,37 +93,9 @@ typedef struct {
 /* Presets are the only source for both compression and generated INI files. */
 static const int fast_defaults[] = {1, 2, 3, 5, 6, 8};
 
+static const int ect_defaults[] = {7, 9};
+
 static const turtledeflate_config_t turtle_defaults[] = {
-  {
-    .i_compression_level = 7,
-    .i_maximum_block_size = 32768,
-    .i_maximum_subblocks = 8,
-    .i_max_block_splitter_iterations = 2,
-    .i_max_internal_block_splitter_iterations = 4,
-    .i_block_splitter_num_points = 7,
-    .i_block_splitter_center_dist = 2,
-    .i_block_splitter_min_range_for_points = 1024,
-    .b_block_splitter_push_split = false,
-    .i_min_start_fp = -3,
-    .i_max_start_fp = 1,
-    .i_num_start_fp = 3,
-    .i_verbose = 0
-  },
-  {
-    .i_compression_level = 8,
-    .i_maximum_block_size = 32768,
-    .i_maximum_subblocks = 16,
-    .i_max_block_splitter_iterations = 4,
-    .i_max_internal_block_splitter_iterations = 10,
-    .i_block_splitter_num_points = 15,
-    .i_block_splitter_center_dist = 4,
-    .i_block_splitter_min_range_for_points = 1024,
-    .b_block_splitter_push_split = false,
-    .i_min_start_fp = -4,
-    .i_max_start_fp = 3,
-    .i_num_start_fp = 6,
-    .i_verbose = 0
-  },
   {
     .i_compression_level = 9,
     .i_maximum_block_size = 1000000,
@@ -180,7 +153,7 @@ static void *ect_worker(void *argument)
   ECT_JOB *job = (ECT_JOB*)argument;
   ZopfliOptions options;
   unsigned char bit_position = 0;
-  ZopfliInitOptions(&options, 9, 0, 0);
+  ZopfliInitOptions(&options, (unsigned)job->mode, 0, 0);
   ZopfliDeflate(&options, 1, job->input, job->input_size,
     &bit_position, &job->output, &job->output_size);
   free(job->input);
@@ -188,11 +161,13 @@ static void *ect_worker(void *argument)
   return NULL;
 }
 
-/* start ECT while Turtledeflate processes the same stable input */
-static int start_ect_job(ECT_JOB *job, FILE *in, uint32_t size)
+/* Read a stable snapshot before ECT starts compressing in the worker. */
+static int start_ect_job(ECT_JOB *job, FILE *in, uint32_t size,
+  int mode)
 {
   int next;
   memset(job, 0, sizeof(*job));
+  job->mode = mode;
   if(!size)
     return 0;
 #if SIZE_MAX <= UINT32_MAX
@@ -539,8 +514,10 @@ static void use_default_config(int level, turtledeflate_config_t *config,
   *fast_level = 0;
   if(level <= (int)ARRAY_N(fast_defaults))
     *fast_level = fast_defaults[level - 1];
+  else if(level < 9)
+    *fast_level = ect_defaults[level - 7];
   else
-    *config = turtle_defaults[level - 7];
+    *config = turtle_defaults[0];
 }
 
 static int default_field_value(const turtledeflate_config_t *config,
@@ -559,8 +536,8 @@ static int write_default_ini(FILE *file)
   size_t field;
   if(fputs("# Compression settings for katzip. Levels 1-6 use libdeflate "
     "on files up to\n# 64 MiB. Larger files use streaming zlib at the "
-    "selected level (capped at 9).\n# Levels 7-9 use Turtledeflate; "
-    "level 9 also tries ECT Zopfli.\n\n", file) == EOF)
+    "selected level (capped at 9).\n# Levels 7-8 use ECT Zopfli; "
+    "level 9 compares ECT and Turtledeflate.\n\n", file) == EOF)
     return -1;
   for(level = 0; level < ARRAY_N(fast_defaults); ++level)
   {
@@ -568,9 +545,15 @@ static int write_default_ini(FILE *file)
       level + 1, fast_defaults[level]) < 0)
       return -1;
   }
+  for(level = 0; level < ARRAY_N(ect_defaults); ++level)
+  {
+    if(fprintf(file, "[ect-%zu]\nlevel = %d\n\n",
+      level + 7, ect_defaults[level]) < 0)
+      return -1;
+  }
   for(level = 0; level < ARRAY_N(turtle_defaults); ++level)
   {
-    if(fprintf(file, "[turtledeflate-%zu]\n", level + 7) < 0)
+    if(fprintf(file, "[turtledeflate-%zu]\n", level + 9) < 0)
       return -1;
     for(field = 0; field < ARRAY_N(config_fields); ++field)
     {
@@ -728,9 +711,12 @@ static int parse_setting(char *line, int level, turtledeflate_config_t *config,
   if(!*value || *end || errno == ERANGE ||
     number < INT32_MIN || number > INT32_MAX)
     return -1;
-  if(level < 7)
+  if(level < 9)
   {
-    if(strcmp(line, "level") || *seen || number < 1 || number > 12)
+    int minimum = level < 7 ? 1 : 2;
+    int maximum = level < 7 ? 12 : 9;
+    if(strcmp(line, "level") || *seen ||
+      number < minimum || number > maximum)
       return -1;
     *fast_level = (int)number;
     *seen = 1;
@@ -761,7 +747,7 @@ static int config_is_complete(int level, int found, uint32_t seen,
 {
   if(!found)
     return 0;
-  if(level < 7)
+  if(level < 9)
     return seen == 1;
   return seen == (UINT32_C(1) << ARRAY_N(config_fields)) - 1 &&
     valid_config(config, level);
@@ -778,8 +764,12 @@ static int read_config(FILE *file, const char *path, int level,
   int found = 0;
   int line_number = 0;
   int invalid = 0;
-  snprintf(section, sizeof(section),
-    level < 7 ? "[libdeflate-%d]" : "[turtledeflate-%d]", level);
+  if(level < 7)
+    snprintf(section, sizeof(section), "[libdeflate-%d]", level);
+  else if(level < 9)
+    snprintf(section, sizeof(section), "[ect-%d]", level);
+  else
+    snprintf(section, sizeof(section), "[turtledeflate-%d]", level);
   memset(config, 0, sizeof(*config));
   *fast_level = 0;
   while(fgets(line, sizeof(line), file))
@@ -1063,6 +1053,88 @@ static int write_fast_entry(void *zip, ENTRY *entry, FILE *in,
   return result;
 }
 
+/* Read again only when DEFLATE would be larger than the original file. */
+static int write_stored_input(void *zip, FILE *in,
+  uint32_t size, uint32_t expected_crc)
+{
+  unsigned char buffer[65536];
+  uint32_t crc = UINT32_MAX;
+  uint32_t remaining = size;
+  if(fseek(in, 0, SEEK_SET))
+    return -1;
+  while(remaining)
+  {
+    size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+    if(fread(buffer, 1, chunk, in) != chunk)
+      return -1;
+    crc = update_crc(crc, buffer, chunk);
+    if(write_zip_bytes(zip, buffer, chunk))
+      return -1;
+    remaining -= (uint32_t)chunk;
+  }
+  if(fgetc(in) != EOF || ferror(in) ||
+    (crc ^ UINT32_MAX) != expected_crc)
+    return -1;
+  return 0;
+}
+
+/* ECT compresses the entire file at once, so levels 7-8 need no
+ * Turtledeflate pass or temporary DEFLATE stream. */
+static int write_ect_entry(void *zip, ENTRY *entry, FILE *in,
+  int mode, int zip_level, PROGRESS *progress)
+{
+  static const unsigned char empty_deflate[] = {0x03, 0x00};
+  ECT_JOB job;
+  const unsigned char *compressed = empty_deflate;
+  uint32_t crc;
+  int store;
+  int result;
+  if(start_ect_job(&job, in, entry->expected_size, mode))
+  {
+    free(job.input);
+    return -1;
+  }
+  if(entry->expected_size && !job.started && !job.input)
+    return -1;
+  progress_start(progress, entry, NULL);
+  if(job.started)
+  {
+    progress_wait(progress);
+    pthread_join(job.thread, NULL);
+    job.started = 0;
+  }
+  else if(job.input)
+    ect_worker(&job);
+  entry->size = entry->expected_size;
+  store = entry->size &&
+    (!job.output || !job.output_size ||
+      job.output_size >= entry->size);
+  entry->compressed_size = store ? entry->size :
+    entry->size ? job.output_size : sizeof(empty_deflate);
+  crc = job.crc ^ UINT32_MAX;
+  if(entry->size)
+    compressed = job.output;
+  result = entry->compressed_size <= UINT32_MAX ? 0 : -1;
+  if(!result)
+    result = open_zip_entry(zip, entry, store ?
+      MZ_COMPRESS_METHOD_STORE : MZ_COMPRESS_METHOD_DEFLATE,
+      zip_level);
+  if(!result)
+  {
+    if(store)
+      result = write_stored_input(zip, in, entry->size, job.crc);
+    else
+      result = write_zip_bytes(zip, compressed,
+        (size_t)entry->compressed_size);
+  }
+  if(!result)
+    result = close_zip_entry(zip, entry, crc);
+  free(job.input);
+  free(job.output);
+  progress_finish(progress, result == 0);
+  return result;
+}
+
 typedef struct {
   unsigned char *buffer;
   void *compressor;
@@ -1094,7 +1166,7 @@ static int prepare_turtle_work(TURTLE_WORK *work, FILE *in,
   if(!work->buffer)
     return -1;
   if(config->i_compression_level == 9 &&
-    start_ect_job(&work->ect, in, entry->expected_size))
+    start_ect_job(&work->ect, in, entry->expected_size, 9))
     return -1;
   if(work->ect.started)
   {
@@ -1787,6 +1859,9 @@ static int write_archive_entries(ARCHIVE_OUTPUT *output,
     }
     if(options->level < 7)
       result = write_fast_entry(output->zip, &list->entries[i], in,
+        fast_level, zip_level_hint(options->level), &output->progress);
+    else if(options->level < 9)
+      result = write_ect_entry(output->zip, &list->entries[i], in,
         fast_level, zip_level_hint(options->level), &output->progress);
     else
       result = write_entry(output->zip, &list->entries[i], in,

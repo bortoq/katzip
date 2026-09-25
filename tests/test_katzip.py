@@ -212,6 +212,24 @@ class KatzipTests(unittest.TestCase):
                 self.assertEqual(opened.read("random.bin"), (self.root / "random.bin").read_bytes())
                 self.assertEqual(opened.getinfo("random.bin").compress_type, zipfile.ZIP_STORED)
 
+    def test_ect_levels_handle_empty_and_incompressible_files(self):
+        (self.root / "empty.bin").write_bytes(b"")
+        random_data = os.urandom(4096)
+        (self.root / "random.bin").write_bytes(random_data)
+        for level in (7, 8):
+            result = self.run_katzip(
+                f"-{level}", "archive", "empty.bin", "random.bin"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with zipfile.ZipFile(self.root / "archive.zip") as archive:
+                self.assertEqual(archive.read("empty.bin"), b"")
+                self.assertEqual(archive.read("random.bin"), random_data)
+                self.assertEqual(
+                    archive.getinfo("random.bin").compress_type,
+                    zipfile.ZIP_STORED,
+                )
+                self.assertIsNone(archive.testzip())
+
     def test_large_fast_file_uses_bounded_memory_path(self):
         large = self.root / "large.bin"
         with large.open("wb") as output:
@@ -275,6 +293,8 @@ class KatzipTests(unittest.TestCase):
         defaults = subprocess.run(
             [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
         ).stdout.decode()
+        self.assertIn("[ect-7]\nlevel = 7", defaults)
+        self.assertIn("[ect-8]\nlevel = 9", defaults)
         executable_ini = binary_dir / "katzip.ini"
         current_ini = document_dir / "katzip.ini"
         executable_ini.write_text(defaults)
@@ -330,19 +350,20 @@ class KatzipTests(unittest.TestCase):
         environment = dict(os.environ)
         environment.pop("KATZIP_INI", None)
         try:
-            result = subprocess.run(
-                [str(binary_dir / "katzip"), "-1", "archive", "input.txt"],
-                cwd=document_dir, env=environment, capture_output=True
-            )
+            for level in (1, 7, 8):
+                result = subprocess.run(
+                    [str(binary_dir / "katzip"), f"-{level}", "archive", "input.txt"],
+                    cwd=document_dir, env=environment, capture_output=True
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(b"using built-in compression settings", result.stderr)
+                with zipfile.ZipFile(document_dir / "archive.zip") as archive:
+                    self.assertEqual(archive.read("input.txt"),
+                                     (document_dir / "input.txt").read_bytes())
         finally:
             binary_dir.chmod(0o755)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(b"using built-in compression settings", result.stderr)
         self.assertFalse((binary_dir / "katzip.ini").exists())
         self.assertFalse((document_dir / "katzip.ini").exists())
-        with zipfile.ZipFile(document_dir / "archive.zip") as archive:
-            self.assertEqual(archive.read("input.txt"),
-                             (document_dir / "input.txt").read_bytes())
 
     def test_recursive_masks_select_files_in_subdirectories(self):
         (self.root / "src" / "nested").mkdir(parents=True)
