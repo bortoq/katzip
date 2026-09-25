@@ -14,7 +14,7 @@ TURTLE_HEADERS = $(wildcard third_party/turtledeflate/inc/*.h third_party/turtle
 MINIZIP_FILES = $(wildcard third_party/minizip-ng/*.[ch] third_party/minizip-ng/CMakeLists.txt)
 ECT_FILES = $(wildcard third_party/ect/src/*.[ch] third_party/ect/src/zopfli/*.[ch] third_party/ect/src/zopfli/*.cpp)
 
-turzip: turzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
+katzip: katzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
 	@set -eu; \
 	build_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$build_dir"' EXIT; \
@@ -38,16 +38,16 @@ turzip: turzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) p
 	    -c "$$build_dir/lib/$$source.c" -o "$$build_dir/$$source.o"; \
 	done; \
 	$(CC) $(CFLAGS) -pthread -I"$$build_dir/inc" -I"$$build_dir/lib" \
-	  -Ithird_party/minizip-ng -I"$$build_dir/minizip" -c turzip.c -o "$$build_dir/turzip.o"; \
-	$(CXX) -pthread -o $@ "$$build_dir/turzip.o" \
+	  -Ithird_party/minizip-ng -I"$$build_dir/minizip" -c katzip.c -o "$$build_dir/katzip.o"; \
+	$(CXX) -pthread -o $@ "$$build_dir/katzip.o" \
 	  "$$build_dir/turtledeflate.o" "$$build_dir/turtledeflate_tree.o" \
 	  "$$build_dir/turtledeflate_block.o" "$$build_dir/turtledeflate_bitstream.o" \
 	  "$$build_dir"/ect_*.o "$$build_dir/minizip/libminizip-ng.a" -ldeflate -lz -lm
 
 clean:
-	rm -f turzip
+	rm -f katzip
 
-test: turzip
+test: katzip
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 .PHONY: clean test

@@ -357,9 +357,9 @@ static char *trim(char *text)
 
 static char *config_path(const char *program)
 {
-  const char *override = getenv("TURZIP_INI");
+  const char *override = getenv("KATZIP_INI");
   const char *slash;
-  const char *name = "turzip.ini";
+  const char *name = "katzip.ini";
   char *path;
   size_t prefix;
   if(override && *override)
@@ -438,13 +438,13 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
   int status = -1;
   if(!path)
   {
-    fprintf(stderr, "turzip: out of memory\n");
+    fprintf(stderr, "katzip: out of memory\n");
     return -1;
   }
   file = fopen(path, "r");
   if(!file)
   {
-    fprintf(stderr, "turzip: cannot open %s: %s\n", path, strerror(errno));
+    fprintf(stderr, "katzip: cannot open %s: %s\n", path, strerror(errno));
     free(path);
     return -1;
   }
@@ -505,20 +505,20 @@ static int load_config(const char *program, int level, turtledeflate_config_t *c
   }
   if(ferror(file))
   {
-    fprintf(stderr, "turzip: cannot read %s\n", path);
+    fprintf(stderr, "katzip: cannot read %s\n", path);
     goto done;
   }
   if(!found || (level < 7 ? (seen != 1 || !*fast_level) :
     (seen != (UINT32_C(1) << ARRAY_N(fields)) - 1 || !valid_config(config, level))))
   {
-    fprintf(stderr, "turzip: missing or invalid settings in %s %s\n", path, section);
+    fprintf(stderr, "katzip: missing or invalid settings in %s %s\n", path, section);
     goto done;
   }
   status = 0;
   goto done;
 
 bad_line:
-  fprintf(stderr, "turzip: invalid setting in %s:%d\n", path, line_number);
+  fprintf(stderr, "katzip: invalid setting in %s:%d\n", path, line_number);
 done:
   fclose(file);
   free(path);
@@ -848,7 +848,7 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
     !S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
     (uint64_t)file_stat.st_size > UINT32_MAX)
   {
-    fprintf(stderr, "turzip: invalid input file: %s\n", path);
+    fprintf(stderr, "katzip: invalid input file: %s\n", path);
     return -1;
   }
   if(list->archive_exists && list->archive_stat.st_dev == file_stat.st_dev &&
@@ -856,7 +856,7 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
   {
     if(recursive)
       return 0;
-    fprintf(stderr, "turzip: archive is an input file: %s\n", path);
+    fprintf(stderr, "katzip: archive is an input file: %s\n", path);
     return -1;
   }
   for(i = 0; i < list->count; ++i)
@@ -865,13 +865,13 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
     {
       if(recursive)
         return 0;
-      fprintf(stderr, "turzip: duplicate entry: %s\n", name);
+      fprintf(stderr, "katzip: duplicate entry: %s\n", name);
       return -1;
     }
   }
   if(list->count == UINT16_MAX)
   {
-    fprintf(stderr, "turzip: too many files\n");
+    fprintf(stderr, "katzip: too many files\n");
     return -1;
   }
   if(list->count == list->capacity)
@@ -882,7 +882,7 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
     grown = realloc(list->entries, capacity * sizeof(*grown));
     if(!grown)
     {
-      fprintf(stderr, "turzip: out of memory\n");
+      fprintf(stderr, "katzip: out of memory\n");
       return -1;
     }
     list->entries = grown;
@@ -896,7 +896,7 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
   {
     free((void*)entry->path);
     free((void*)entry->name);
-    fprintf(stderr, "turzip: out of memory\n");
+    fprintf(stderr, "katzip: out of memory\n");
     return -1;
   }
   entry->name_len = (uint16_t)strlen(name);
@@ -952,7 +952,7 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
   int status = 0;
   if(!stream)
   {
-    fprintf(stderr, "turzip: cannot open directory %s: %s\n", directory, strerror(errno));
+    fprintf(stderr, "katzip: cannot open directory %s: %s\n", directory, strerror(errno));
     return -1;
   }
   for(;;)
@@ -975,7 +975,7 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
     }
     if(lstat(path, &file_stat))
     {
-      fprintf(stderr, "turzip: cannot inspect %s: %s\n", path, strerror(errno));
+      fprintf(stderr, "katzip: cannot inspect %s: %s\n", path, strerror(errno));
       status = -1;
     }
     else if(S_ISDIR(file_stat.st_mode))
@@ -1007,7 +1007,7 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive, c
     name += 2;
   if(!valid_name(name))
   {
-    fprintf(stderr, "turzip: invalid input: %s\n", argument);
+    fprintf(stderr, "katzip: invalid input: %s\n", argument);
     return -1;
   }
   if(!recursive)
@@ -1032,7 +1032,7 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive, c
       return 0;
     return add_entry(list, argument, 1);
   }
-  fprintf(stderr, "turzip: invalid input: %s\n", argument);
+  fprintf(stderr, "katzip: invalid input: %s\n", argument);
   return -1;
 }
 
@@ -1087,14 +1087,14 @@ int main(int argc, char **argv)
       level = argv[archive_arg][1] - '0';
     else
     {
-      fprintf(stderr, "turzip: unknown option: %s\n", argv[archive_arg]);
+      fprintf(stderr, "katzip: unknown option: %s\n", argv[archive_arg]);
       return 1;
     }
     ++archive_arg;
   }
   if(argc <= archive_arg)
   {
-    fprintf(stderr, "usage: turzip [-1..-9] [-r] archive_name file[s] [@MASK ...]\n");
+    fprintf(stderr, "usage: katzip [-1..-9] [-r] archive_name file[s] [@MASK ...]\n");
     return 1;
   }
   if(load_config(argv[0], level, &config, &fast_level))
@@ -1102,7 +1102,7 @@ int main(int argc, char **argv)
   archive_path = archive_name(argv[archive_arg]);
   if(!archive_path)
   {
-    fprintf(stderr, "turzip: invalid archive name\n");
+    fprintf(stderr, "katzip: invalid archive name\n");
     return 1;
   }
   memset(&list, 0, sizeof(list));
@@ -1113,7 +1113,7 @@ int main(int argc, char **argv)
   masks = calloc((size_t)argc, sizeof(*masks));
   if(!masks)
   {
-    fprintf(stderr, "turzip: out of memory\n");
+    fprintf(stderr, "katzip: out of memory\n");
     goto done;
   }
   for(i = archive_arg + 1; i < argc; ++i)
@@ -1122,7 +1122,7 @@ int main(int argc, char **argv)
     {
       if(!argv[i][1])
       {
-        fprintf(stderr, "turzip: empty file mask\n");
+        fprintf(stderr, "katzip: empty file mask\n");
         goto done;
       }
       masks[mask_count++] = argv[i] + 1;
@@ -1132,7 +1132,7 @@ int main(int argc, char **argv)
   }
   if(!source_count && !mask_count)
   {
-    fprintf(stderr, "turzip: no input files or masks\n");
+    fprintf(stderr, "katzip: no input files or masks\n");
     goto done;
   }
   if(!source_count)
@@ -1149,26 +1149,26 @@ int main(int argc, char **argv)
   }
   if(!list.count)
   {
-    fprintf(stderr, "turzip: no files to archive\n");
+    fprintf(stderr, "katzip: no files to archive\n");
     goto done;
   }
   if(progress_init(&progress))
   {
-    fprintf(stderr, "turzip: cannot start progress display\n");
+    fprintf(stderr, "katzip: cannot start progress display\n");
     goto done;
   }
   progress_ready = 1;
   temporary_path = malloc(strlen(archive_path) + sizeof(".tmp.XXXXXX"));
   if(!temporary_path)
   {
-    fprintf(stderr, "turzip: out of memory\n");
+    fprintf(stderr, "katzip: out of memory\n");
     goto done;
   }
   sprintf(temporary_path, "%s.tmp.XXXXXX", archive_path);
   i = mkstemp(temporary_path);
   if(i < 0)
   {
-    fprintf(stderr, "turzip: cannot create temporary archive: %s\n", strerror(errno));
+    fprintf(stderr, "katzip: cannot create temporary archive: %s\n", strerror(errno));
     goto done;
   }
   if(close(i))
@@ -1186,7 +1186,7 @@ int main(int argc, char **argv)
     if(!in || (level < 7 ? write_fast_entry(zip, &list.entries[i], in, fast_level, &progress) :
       write_entry(zip, &list.entries[i], in, &config, &progress)))
     {
-      fprintf(stderr, "turzip: cannot archive %s\n", list.entries[i].path);
+      fprintf(stderr, "katzip: cannot archive %s\n", list.entries[i].path);
       if(in)
         fclose(in);
       goto output_error;
@@ -1250,7 +1250,7 @@ remove_temp:
     mz_zip_reader_delete(&reader);
   if(writer)
     mz_zip_writer_delete(&writer);
-  fprintf(stderr, "turzip: failed to write archive %s: %s\n", archive_path, strerror(error_number));
+  fprintf(stderr, "katzip: failed to write archive %s: %s\n", archive_path, strerror(error_number));
   remove(temporary_path);
 done:
   if(progress_ready)

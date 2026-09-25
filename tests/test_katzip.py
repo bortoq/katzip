@@ -8,17 +8,17 @@ import unittest
 import zipfile
 
 
-PROGRAM = pathlib.Path(__file__).resolve().parents[1] / "turzip"
-CONFIG = pathlib.Path(__file__).resolve().parents[1] / "turzip.ini"
+PROGRAM = pathlib.Path(__file__).resolve().parents[1] / "katzip"
+CONFIG = pathlib.Path(__file__).resolve().parents[1] / "katzip.ini"
 
 
-class TurzipTests(unittest.TestCase):
+class KatzipTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
 
-    def run_turzip(self, *arguments, **kwargs):
+    def run_katzip(self, *arguments, **kwargs):
         return subprocess.run(
             [str(PROGRAM), *arguments], cwd=self.root, capture_output=True, **kwargs
         )
@@ -26,7 +26,7 @@ class TurzipTests(unittest.TestCase):
     def test_utf8_empty_file_and_exact_zip_overhead(self):
         name = "текст.fb2"
         (self.root / name).write_bytes(b"")
-        result = self.run_turzip("-1", "archive", name)
+        result = self.run_katzip("-1", "archive", name)
         self.assertEqual(result.returncode, 0, result.stderr)
         archive = (self.root / "archive.zip").read_bytes()
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
@@ -45,7 +45,7 @@ class TurzipTests(unittest.TestCase):
             signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
             resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
 
-        result = self.run_turzip(
+        result = self.run_katzip(
             "-1", "archive.zip", "large.bin", preexec_fn=limit_output
         )
         self.assertNotEqual(result.returncode, 0)
@@ -57,7 +57,7 @@ class TurzipTests(unittest.TestCase):
         archive.write_bytes(b"previous archive")
         archive.chmod(0o640)
         (self.root / "input.txt").write_text("new content")
-        result = self.run_turzip("-1", "archive.zip", "input.txt")
+        result = self.run_katzip("-1", "archive.zip", "input.txt")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(archive.stat().st_mode & 0o777, 0o640)
         with zipfile.ZipFile(archive) as opened:
@@ -66,7 +66,7 @@ class TurzipTests(unittest.TestCase):
     def test_zip_overhead_for_multiple_files(self):
         (self.root / "one.txt").write_bytes(b"one")
         (self.root / "two.txt").write_bytes(b"two")
-        result = self.run_turzip("-1", "archive", "one.txt", "two.txt")
+        result = self.run_katzip("-1", "archive", "one.txt", "two.txt")
         self.assertEqual(result.returncode, 0, result.stderr)
         archive = self.root / "archive.zip"
         with zipfile.ZipFile(archive) as opened:
@@ -82,7 +82,7 @@ class TurzipTests(unittest.TestCase):
     def test_level_nine_writes_valid_raw_deflate(self):
         content = b"foo bar baz\n" * 300 + bytes(range(256))
         (self.root / "pattern.bin").write_bytes(content)
-        result = self.run_turzip("-9", "archive", "pattern.bin")
+        result = self.run_katzip("-9", "archive", "pattern.bin")
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
             self.assertEqual(opened.read("pattern.bin"), content)
@@ -93,7 +93,7 @@ class TurzipTests(unittest.TestCase):
         (self.root / "text.txt").write_bytes(content)
         (self.root / "random.bin").write_bytes(os.urandom(65536))
         for level in range(1, 7):
-            result = self.run_turzip(f"-{level}", "archive", "text.txt", "random.bin")
+            result = self.run_katzip(f"-{level}", "archive", "text.txt", "random.bin")
             self.assertEqual(result.returncode, 0, result.stderr)
             with zipfile.ZipFile(self.root / "archive.zip") as opened:
                 self.assertEqual(opened.read("text.txt"), content)
@@ -105,7 +105,7 @@ class TurzipTests(unittest.TestCase):
         large = self.root / "large.bin"
         with large.open("wb") as output:
             output.truncate(65 * 1024 * 1024)
-        result = self.run_turzip("-1", "archive", "large.bin")
+        result = self.run_katzip("-1", "archive", "large.bin")
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
             info = opened.getinfo("large.bin")
@@ -120,13 +120,13 @@ class TurzipTests(unittest.TestCase):
     def test_unsafe_config_is_rejected(self):
         (self.root / "input.txt").write_text("test")
         config = self.root / "custom.ini"
-        environment = dict(os.environ, TURZIP_INI=str(config))
+        environment = dict(os.environ, KATZIP_INI=str(config))
         for key, replacement in (
             ("i_maximum_block_size = 1000000", "i_maximum_block_size = 1000001"),
             ("i_min_start_fp = -6", "i_min_start_fp = -2147483648"),
         ):
             config.write_text(CONFIG.read_text().replace(key, replacement))
-            result = self.run_turzip("-9", "archive", "input.txt", env=environment)
+            result = self.run_katzip("-9", "archive", "input.txt", env=environment)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid settings", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
@@ -157,7 +157,7 @@ class TurzipTests(unittest.TestCase):
         (self.root / "nested").mkdir()
         (self.root / "report.txt").write_text("report")
         (self.root / "nested" / "private.txt").write_text("private")
-        result = self.run_turzip("-r", "-1", "selection", "report.txt")
+        result = self.run_katzip("-r", "-1", "selection", "report.txt")
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "selection.zip") as opened:
             self.assertEqual(opened.namelist(), ["report.txt"])
@@ -167,7 +167,7 @@ class TurzipTests(unittest.TestCase):
         (self.root / "src" / "nested" / "file1.txt").write_text("one")
         (self.root / "src" / "nested" / "fileA.txt").write_text("other")
         (self.root / "src" / "file2.txt").write_text("top")
-        result = self.run_turzip("-r", "-1", "selection", "src", "@nested/file[0-9].txt")
+        result = self.run_katzip("-r", "-1", "selection", "src", "@nested/file[0-9].txt")
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "selection.zip") as opened:
             self.assertEqual(opened.namelist(), ["src/nested/file1.txt"])
