@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -12,28 +13,25 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "turtledeflate_api.h"
+#include "mz.h"
+#include "mz_strm.h"
+#include "mz_zip.h"
+#include "mz_zip_rw.h"
 
 typedef struct {
   const char *path;
   const char *name;
   uint16_t name_len;
   uint16_t flags;
-  uint16_t dos_time;
-  uint16_t dos_date;
   uint32_t mode;
-  uint32_t offset;
-  uint32_t crc;
-  uint32_t compressed_size;
   uint32_t expected_size;
   uint32_t size;
+  uint64_t compressed_size;
+  time_t mtime;
 } ENTRY;
-
-typedef struct {
-  FILE *file;
-  uint64_t offset;
-} OUTPUT;
 
 typedef struct {
   const char *name;
@@ -45,9 +43,6 @@ typedef struct {
   ENTRY *entries;
   size_t count;
   size_t capacity;
-  char **searched;
-  size_t searched_count;
-  size_t searched_capacity;
   struct stat archive_stat;
   int archive_exists;
 } ENTRY_LIST;
@@ -70,32 +65,8 @@ typedef struct {
 } PROGRESS;
 
 #define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
-
-static int write_bytes(OUTPUT *out, const void *data, size_t size)
-{
-  if(out->offset + size > UINT32_MAX || fwrite(data, 1, size, out->file) != size)
-    return -1;
-  out->offset += size;
-  return 0;
-}
-
-static int write_u16(OUTPUT *out, uint16_t value)
-{
-  unsigned char bytes[2];
-  bytes[0] = (unsigned char)value;
-  bytes[1] = (unsigned char)(value >> 8);
-  return write_bytes(out, bytes, sizeof(bytes));
-}
-
-static int write_u32(OUTPUT *out, uint32_t value)
-{
-  unsigned char bytes[4];
-  bytes[0] = (unsigned char)value;
-  bytes[1] = (unsigned char)(value >> 8);
-  bytes[2] = (unsigned char)(value >> 16);
-  bytes[3] = (unsigned char)(value >> 24);
-  return write_bytes(out, bytes, sizeof(bytes));
-}
+/* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
+#define MAX_BLOCK_SIZE 1000000
 
 static uint32_t update_crc(uint32_t crc, const unsigned char *data, size_t size)
 {
@@ -318,64 +289,6 @@ static void progress_destroy(PROGRESS *progress)
   pthread_mutex_destroy(&progress->mutex);
 }
 
-static void set_dos_time(ENTRY *entry, time_t value)
-{
-  struct tm *date = localtime(&value);
-  int year;
-  if(!date)
-  {
-    entry->dos_time = 0;
-    entry->dos_date = (1 << 5) | 1;
-    return;
-  }
-  year = date->tm_year + 1900;
-  if(year < 1980)
-    year = 1980;
-  if(year > 2107)
-    year = 2107;
-  entry->dos_time = (uint16_t)((date->tm_hour << 11) | (date->tm_min << 5) | (date->tm_sec / 2));
-  entry->dos_date = (uint16_t)(((year - 1980) << 9) | ((date->tm_mon + 1) << 5) | date->tm_mday);
-}
-
-static int write_local_header(OUTPUT *out, const ENTRY *entry)
-{
-  return write_u32(out, UINT32_C(0x04034b50)) ||
-    write_u16(out, 20) || write_u16(out, entry->flags) || write_u16(out, 8) ||
-    write_u16(out, entry->dos_time) || write_u16(out, entry->dos_date) ||
-    write_u32(out, 0) || write_u32(out, 0) || write_u32(out, 0) ||
-    write_u16(out, entry->name_len) || write_u16(out, 0) ||
-    write_bytes(out, entry->name, entry->name_len) ? -1 : 0;
-}
-
-static int write_descriptor(OUTPUT *out, const ENTRY *entry)
-{
-  return write_u32(out, UINT32_C(0x08074b50)) || write_u32(out, entry->crc) ||
-    write_u32(out, entry->compressed_size) || write_u32(out, entry->size) ? -1 : 0;
-}
-
-static int write_central_header(OUTPUT *out, const ENTRY *entry)
-{
-  return write_u32(out, UINT32_C(0x02014b50)) ||
-    write_u16(out, (3 << 8) | 20) || write_u16(out, 20) ||
-    write_u16(out, entry->flags) || write_u16(out, 8) ||
-    write_u16(out, entry->dos_time) || write_u16(out, entry->dos_date) ||
-    write_u32(out, entry->crc) || write_u32(out, entry->compressed_size) ||
-    write_u32(out, entry->size) || write_u16(out, entry->name_len) ||
-    write_u16(out, 0) || write_u16(out, 0) || write_u16(out, 0) ||
-    write_u16(out, 0) || write_u32(out, entry->mode << 16) ||
-    write_u32(out, entry->offset) ||
-    write_bytes(out, entry->name, entry->name_len) ? -1 : 0;
-}
-
-static int write_end(OUTPUT *out, uint16_t count, uint32_t central_offset, uint32_t central_size)
-{
-  return write_u32(out, UINT32_C(0x06054b50)) ||
-    write_u16(out, 0) || write_u16(out, 0) ||
-    write_u16(out, count) || write_u16(out, count) ||
-    write_u32(out, central_size) || write_u32(out, central_offset) ||
-    write_u16(out, 0) ? -1 : 0;
-}
-
 static char *trim(char *text)
 {
   size_t size;
@@ -416,16 +329,20 @@ static int valid_config(const turtledeflate_config_t *config, int level)
 {
   return config->i_compression_level == level &&
     config->i_maximum_block_size >= TURTLEDEFLATE_MIN_BLOCK_SIZE &&
-    config->i_maximum_block_size <= INT32_MAX / 3 &&
+    config->i_maximum_block_size <= MAX_BLOCK_SIZE &&
     config->i_maximum_subblocks >= TURTLEDEFLATE_MIN_SUBBLOCKS &&
     config->i_maximum_subblocks <= TURTLEDEFLATE_MAX_SUBBLOCKS &&
     config->i_max_block_splitter_iterations > 0 &&
+    config->i_max_block_splitter_iterations <= 1000 &&
     config->i_max_internal_block_splitter_iterations > 0 &&
+    config->i_max_internal_block_splitter_iterations <= 1000 &&
     config->i_block_splitter_num_points > 0 &&
     config->i_block_splitter_num_points <= TURTLEDEFLATE_BSPLIT_MAX_NUM_POINTS &&
     config->i_block_splitter_center_dist > 0 &&
     config->i_block_splitter_center_dist <= config->i_block_splitter_num_points &&
     config->i_block_splitter_min_range_for_points > 0 &&
+    config->i_min_start_fp >= -32 &&
+    config->i_max_start_fp <= 32 &&
     config->i_min_start_fp <= config->i_max_start_fp &&
     config->i_num_start_fp >= 2 &&
     config->i_num_start_fp <= TURTLEDEFLATE_MAX_NUM_FP_START / 2 &&
@@ -543,14 +460,15 @@ done:
   return status;
 }
 
-static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
+static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
 {
   unsigned char *buffer;
   unsigned char *compressed;
   turtledeflate_config_t compressor_config = *config;
+  mz_zip_file file_info;
   void *compressor = NULL;
-  uint64_t start;
   uint32_t crc = UINT32_MAX;
+  int64_t compressed_total = 0;
   size_t size;
   int next;
   int compressed_size;
@@ -560,10 +478,19 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
   buffer = malloc((size_t)config->i_maximum_block_size);
   if(!buffer)
     return -1;
-  entry->offset = (uint32_t)out->offset;
-  if(write_local_header(out, entry))
+  memset(&file_info, 0, sizeof(file_info));
+  file_info.version_madeby = (3 << 8) | 20;
+  file_info.version_needed = 20;
+  file_info.flag = entry->flags;
+  file_info.compression_method = MZ_COMPRESS_METHOD_DEFLATE;
+  file_info.uncompressed_size = entry->expected_size;
+  file_info.zip64 = MZ_ZIP64_DISABLE;
+  file_info.modified_date = entry->mtime;
+  file_info.filename = entry->name;
+  file_info.filename_size = entry->name_len;
+  file_info.external_fa = entry->mode << 16;
+  if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
     goto done;
-  start = out->offset;
   size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
   if(ferror(in))
     goto done;
@@ -586,8 +513,9 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
     entry->size += (uint32_t)size;
     progress_block(progress, (uint32_t)size);
     compressed_size = turtledeflate_block(compressor, (int32_t)size, buffer, &compressed, NULL, next == EOF);
-    if(compressed_size < 0 || write_bytes(out, compressed, (size_t)compressed_size))
+    if(compressed_size < 0 || mz_zip_entry_write(zip, compressed, compressed_size) != compressed_size)
       goto done;
+    compressed_total += compressed_size;
     progress_update(progress, entry->size);
     if(next == EOF)
       break;
@@ -598,13 +526,13 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
   if(!entry->size)
   {
     const unsigned char empty_deflate[] = {0x03, 0x00};
-    if(write_bytes(out, empty_deflate, sizeof(empty_deflate)))
+    if(mz_zip_entry_write(zip, empty_deflate, sizeof(empty_deflate)) != (int32_t)sizeof(empty_deflate))
       goto done;
+    compressed_total = sizeof(empty_deflate);
   }
-  entry->crc = crc ^ UINT32_MAX;
-  entry->compressed_size = (uint32_t)(out->offset - start);
-  if(write_descriptor(out, entry))
+  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, compressed_total, entry->size) != MZ_OK)
     goto done;
+  entry->compressed_size = (uint64_t)compressed_total;
   status = 0;
 
 done:
@@ -713,10 +641,10 @@ static int add_entry(ENTRY_LIST *list, const char *path, int recursive)
     return -1;
   }
   entry->name_len = (uint16_t)strlen(name);
-  entry->flags = (uint16_t)(8 | (valid_utf8(name) ? 0x0800 : 0));
+  entry->flags = (uint16_t)(valid_utf8(name) ? MZ_ZIP_FLAG_UTF8 : 0);
   entry->mode = (uint32_t)file_stat.st_mode;
   entry->expected_size = (uint32_t)file_stat.st_size;
-  set_dos_time(entry, file_stat.st_mtime);
+  entry->mtime = file_stat.st_mtime;
   ++list->count;
   return 0;
 }
@@ -737,25 +665,25 @@ static char *join_path(const char *directory, const char *name)
   return path;
 }
 
-static int matches_pattern(const char *pattern, const char *relative, const char *basename)
+static int matches_masks(const char **masks, size_t count, const char *relative, const char *basename)
 {
-  const char *suffix;
-  if(!pattern)
+  size_t i;
+  if(!count)
     return 1;
-  if(!strchr(pattern, '/'))
-    return fnmatch(pattern, basename, 0) == 0;
-  for(suffix = relative; ; ++suffix)
+  for(i = 0; i < count; ++i)
   {
-    if(fnmatch(pattern, suffix, FNM_PATHNAME) == 0)
+    if(strchr(masks[i], '/'))
+    {
+      if(fnmatch(masks[i], relative, FNM_PATHNAME | FNM_PERIOD) == 0)
+        return 1;
+    }
+    else if(fnmatch(masks[i], basename, FNM_PERIOD) == 0)
       return 1;
-    suffix = strchr(suffix, '/');
-    if(!suffix)
-      break;
   }
   return 0;
 }
 
-static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char *pattern, size_t *matched)
+static int walk_directory(ENTRY_LIST *list, const char *directory, const char *root, const char **masks, size_t mask_count)
 {
   DIR *stream = opendir(directory);
   struct dirent *item;
@@ -792,16 +720,12 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
       status = -1;
     }
     else if(S_ISDIR(file_stat.st_mode))
-      status = walk_directory(list, path, root, pattern, matched);
+      status = walk_directory(list, path, root, masks, mask_count);
     else if(S_ISREG(file_stat.st_mode))
     {
       relative = strcmp(root, ".") == 0 ? path : path + strlen(root) + 1;
-      if(matches_pattern(pattern, relative, item->d_name))
-      {
-        if(matched)
-          ++*matched;
+      if(matches_masks(masks, mask_count, relative, item->d_name))
         status = add_entry(list, path, 1);
-      }
     }
     free(path);
     if(status)
@@ -812,57 +736,12 @@ static int walk_directory(ENTRY_LIST *list, const char *directory, const char *r
   return status;
 }
 
-static int search_files(ENTRY_LIST *list, const char *root, const char *pattern)
+static int add_argument(ENTRY_LIST *list, const char *argument, int recursive, const char **masks, size_t mask_count)
 {
-  char *key = join_path(root, pattern);
-  char **grown;
-  size_t capacity;
-  size_t matched = 0;
-  size_t i;
-  int status;
-  if(!key)
-    return -1;
-  for(i = 0; i < list->searched_count; ++i)
-  {
-    if(strcmp(key, list->searched[i]) == 0)
-    {
-      free(key);
-      return 0;
-    }
-  }
-  if(list->searched_count == list->searched_capacity)
-  {
-    capacity = list->searched_capacity ? list->searched_capacity * 2 : 8;
-    grown = realloc(list->searched, capacity * sizeof(*grown));
-    if(!grown)
-    {
-      free(key);
-      return -1;
-    }
-    list->searched = grown;
-    list->searched_capacity = capacity;
-  }
-  list->searched[list->searched_count++] = key;
-  status = walk_directory(list, root, root, pattern, &matched);
-  if(!status && !matched)
-  {
-    fprintf(stderr, "turzip: no files match %s\n", key);
-    return -1;
-  }
-  return status;
-}
-
-static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
-{
-  const char *magic;
-  const char *slash;
   const char *name = argument;
   const char *base;
-  const char *dot;
   struct stat file_stat;
   char *root;
-  char *extension_pattern;
-  const char *pattern;
   size_t prefix;
   int status;
   while(name[0] == '.' && name[1] == '/')
@@ -872,29 +751,9 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
     fprintf(stderr, "turzip: invalid input: %s\n", argument);
     return -1;
   }
-  magic = strpbrk(argument, "*?[");
-  if(recursive && magic)
-  {
-    slash = NULL;
-    for(pattern = argument; pattern < magic; ++pattern)
-    {
-      if(*pattern == '/')
-        slash = pattern;
-    }
-    prefix = slash ? (size_t)(slash - argument) : 0;
-    root = prefix ? malloc(prefix + 1) : copy_text(".");
-    if(!root)
-      return -1;
-    if(prefix)
-    {
-      memcpy(root, argument, prefix);
-      root[prefix] = 0;
-    }
-    pattern = slash ? slash + 1 : argument;
-    status = search_files(list, root, pattern);
-    free(root);
-  }
-  else if(recursive && !stat(argument, &file_stat) && S_ISDIR(file_stat.st_mode))
+  if(!recursive)
+    return add_entry(list, argument, 0);
+  if(!stat(argument, &file_stat) && S_ISDIR(file_stat.st_mode))
   {
     root = copy_text(argument);
     if(!root)
@@ -902,42 +761,20 @@ static int add_argument(ENTRY_LIST *list, const char *argument, int recursive)
     prefix = strlen(root);
     while(prefix > 1 && root[prefix - 1] == '/')
       root[--prefix] = 0;
-    status = walk_directory(list, root, root, NULL, NULL);
+    status = walk_directory(list, root, root, masks, mask_count);
     free(root);
+    return status;
   }
-  else if(recursive && !stat(argument, &file_stat) && S_ISREG(file_stat.st_mode))
+  if(!stat(argument, &file_stat) && S_ISREG(file_stat.st_mode))
   {
-    status = add_entry(list, argument, 1);
-    if(status)
-      return status;
-    slash = strrchr(argument, '/');
-    base = slash ? slash + 1 : argument;
-    dot = strrchr(base, '.');
-    if(!dot || dot == base || !dot[1])
+    base = strrchr(argument, '/');
+    base = base ? base + 1 : argument;
+    if(!matches_masks(masks, mask_count, name, base))
       return 0;
-    prefix = slash ? (size_t)(slash - argument) : 0;
-    root = prefix ? malloc(prefix + 1) : copy_text(".");
-    extension_pattern = malloc(strlen(dot) + 2);
-    if(!root || !extension_pattern)
-    {
-      free(root);
-      free(extension_pattern);
-      return -1;
-    }
-    if(prefix)
-    {
-      memcpy(root, argument, prefix);
-      root[prefix] = 0;
-    }
-    extension_pattern[0] = '*';
-    strcpy(extension_pattern + 1, dot);
-    status = search_files(list, root, extension_pattern);
-    free(root);
-    free(extension_pattern);
+    return add_entry(list, argument, 1);
   }
-  else
-    status = add_entry(list, argument, 0);
-  return status;
+  fprintf(stderr, "turzip: invalid input: %s\n", argument);
+  return -1;
 }
 
 static void free_entries(ENTRY_LIST *list)
@@ -949,25 +786,31 @@ static void free_entries(ENTRY_LIST *list)
     free((void*)list->entries[i].name);
   }
   free(list->entries);
-  for(i = 0; i < list->searched_count; ++i)
-    free(list->searched[i]);
-  free(list->searched);
 }
 
 int main(int argc, char **argv)
 {
   ENTRY_LIST list;
   PROGRESS progress;
-  OUTPUT out;
+  void *writer = NULL;
+  void *zip = NULL;
+  void *reader = NULL;
   FILE *in;
   char *archive_path;
-  uint32_t central_offset;
-  uint32_t central_size;
+  char *temporary_path = NULL;
+  const char **masks = NULL;
+  size_t mask_count = 0;
   turtledeflate_config_t config;
   int archive_arg = 1;
   int level = 7;
   int recursive = 0;
+  int source_count = 0;
   int progress_ready = 0;
+  int error_number;
+  struct stat output_stat;
+  mode_t output_mode;
+  mode_t process_umask;
+  uint64_t expected_archive_size = 22;
   int i;
   int status = 1;
 
@@ -989,9 +832,9 @@ int main(int argc, char **argv)
     }
     ++archive_arg;
   }
-  if(argc <= archive_arg + 1)
+  if(argc <= archive_arg)
   {
-    fprintf(stderr, "usage: turzip [-1..-9] [-r] archive_name file[s]\n");
+    fprintf(stderr, "usage: turzip [-1..-9] [-r] archive_name file[s] [@MASK ...]\n");
     return 1;
   }
   if(load_config(argv[0], level, &config))
@@ -1004,9 +847,44 @@ int main(int argc, char **argv)
   }
   memset(&list, 0, sizeof(list));
   list.archive_exists = stat(archive_path, &list.archive_stat) == 0;
+  process_umask = umask(0);
+  umask(process_umask);
+  output_mode = list.archive_exists ? list.archive_stat.st_mode & 0777 : 0666 & ~process_umask;
+  masks = calloc((size_t)argc, sizeof(*masks));
+  if(!masks)
+  {
+    fprintf(stderr, "turzip: out of memory\n");
+    goto done;
+  }
   for(i = archive_arg + 1; i < argc; ++i)
   {
-    if(add_argument(&list, argv[i], recursive))
+    if(recursive && argv[i][0] == '@')
+    {
+      if(!argv[i][1])
+      {
+        fprintf(stderr, "turzip: empty file mask\n");
+        goto done;
+      }
+      masks[mask_count++] = argv[i] + 1;
+    }
+    else
+      ++source_count;
+  }
+  if(!source_count && !mask_count)
+  {
+    fprintf(stderr, "turzip: no input files or masks\n");
+    goto done;
+  }
+  if(!source_count)
+  {
+    if(add_argument(&list, ".", recursive, masks, mask_count))
+      goto done;
+  }
+  for(i = archive_arg + 1; i < argc; ++i)
+  {
+    if(recursive && argv[i][0] == '@')
+      continue;
+    if(add_argument(&list, argv[i], recursive, masks, mask_count))
       goto done;
   }
   if(!list.count)
@@ -1020,17 +898,32 @@ int main(int argc, char **argv)
     goto done;
   }
   progress_ready = 1;
-  out.file = fopen(archive_path, "wb");
-  if(!out.file)
+  temporary_path = malloc(strlen(archive_path) + sizeof(".tmp.XXXXXX"));
+  if(!temporary_path)
   {
-    fprintf(stderr, "turzip: cannot create %s: %s\n", archive_path, strerror(errno));
+    fprintf(stderr, "turzip: out of memory\n");
     goto done;
   }
-  out.offset = 0;
+  sprintf(temporary_path, "%s.tmp.XXXXXX", archive_path);
+  i = mkstemp(temporary_path);
+  if(i < 0)
+  {
+    fprintf(stderr, "turzip: cannot create temporary archive: %s\n", strerror(errno));
+    goto done;
+  }
+  if(close(i))
+  {
+    error_number = errno;
+    goto remove_temp;
+  }
+  writer = mz_zip_writer_create();
+  if(!writer || mz_zip_writer_open_file(writer, temporary_path, 0, 0) != MZ_OK ||
+    mz_zip_writer_get_zip_handle(writer, &zip) != MZ_OK)
+    goto output_error;
   for(i = 0; i < (int)list.count; ++i)
   {
     in = fopen(list.entries[i].path, "rb");
-    if(!in || write_entry(&out, &list.entries[i], in, &config, &progress))
+    if(!in || write_entry(zip, &list.entries[i], in, &config, &progress))
     {
       fprintf(stderr, "turzip: cannot archive %s\n", list.entries[i].path);
       if(in)
@@ -1040,31 +933,70 @@ int main(int argc, char **argv)
     if(fclose(in))
       goto output_error;
   }
-  central_offset = (uint32_t)out.offset;
-  for(i = 0; i < (int)list.count; ++i)
-  {
-    if(write_central_header(&out, &list.entries[i]))
-      goto output_error;
-  }
-  central_size = (uint32_t)out.offset - central_offset;
-  if(write_end(&out, (uint16_t)list.count, central_offset, central_size))
+  if(mz_zip_writer_close(writer) != MZ_OK)
     goto output_error;
-  if(fclose(out.file))
+  mz_zip_writer_delete(&writer);
+  for(i = 0; i < (int)list.count; ++i)
+    expected_archive_size += list.entries[i].compressed_size + 76 + 2 * list.entries[i].name_len;
+  if(expected_archive_size > UINT32_MAX || stat(temporary_path, &output_stat) || output_stat.st_size < 0 ||
+    (uint64_t)output_stat.st_size != expected_archive_size)
   {
-    remove(archive_path);
-    goto done;
+    errno = EIO;
+    goto output_error;
+  }
+  reader = mz_zip_reader_create();
+  if(!reader || mz_zip_reader_open_file(reader, temporary_path) != MZ_OK)
+  {
+    errno = EIO;
+    goto output_error;
+  }
+  mz_zip_reader_delete(&reader);
+  i = open(temporary_path, O_RDONLY);
+  if(i < 0)
+  {
+    error_number = errno;
+    goto remove_temp;
+  }
+  if(fchmod(i, output_mode))
+  {
+    error_number = errno;
+    close(i);
+    goto remove_temp;
+  }
+  if(fsync(i))
+  {
+    error_number = errno;
+    close(i);
+    goto remove_temp;
+  }
+  if(close(i))
+  {
+    error_number = errno;
+    goto remove_temp;
+  }
+  if(rename(temporary_path, archive_path))
+  {
+    error_number = errno;
+    goto remove_temp;
   }
   status = 0;
   goto done;
 
 output_error:
-  fprintf(stderr, "turzip: failed to write archive %s\n", archive_path);
-  fclose(out.file);
-  remove(archive_path);
+  error_number = errno ? errno : EIO;
+remove_temp:
+  if(reader)
+    mz_zip_reader_delete(&reader);
+  if(writer)
+    mz_zip_writer_delete(&writer);
+  fprintf(stderr, "turzip: failed to write archive %s: %s\n", archive_path, strerror(error_number));
+  remove(temporary_path);
 done:
   if(progress_ready)
     progress_destroy(&progress);
   free_entries(&list);
+  free(masks);
+  free(temporary_path);
   free(archive_path);
   return status;
 }

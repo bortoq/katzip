@@ -1,1 +1,3 @@
 /turzip
+__pycache__/
+*.pyc
