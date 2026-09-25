@@ -79,6 +79,15 @@ class TurzipTests(unittest.TestCase):
                 expected_overhead,
             )
 
+    def test_level_nine_writes_valid_raw_deflate(self):
+        content = b"foo bar baz\n" * 300 + bytes(range(256))
+        (self.root / "pattern.bin").write_bytes(content)
+        result = self.run_turzip("-9", "archive", "pattern.bin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            self.assertEqual(opened.read("pattern.bin"), content)
+            self.assertIsNone(opened.testzip())
+
     def test_unsafe_config_is_rejected(self):
         (self.root / "input.txt").write_text("test")
         config = self.root / "custom.ini"

@@ -20,6 +20,8 @@
 #include "mz_strm.h"
 #include "mz_zip.h"
 #include "mz_zip_rw.h"
+#include "third_party/ect/src/zopfli/deflate.h"
+#include "third_party/ect/src/zopfli/zopfli.h"
 
 typedef struct {
   const char *path;
@@ -64,6 +66,16 @@ typedef struct {
   int stop;
 } PROGRESS;
 
+typedef struct {
+  pthread_t thread;
+  unsigned char *input;
+  unsigned char *output;
+  size_t input_size;
+  size_t output_size;
+  uint32_t crc;
+  int started;
+} ECT_JOB;
+
 #define ARRAY_N(A) (sizeof(A) / sizeof((A)[0]))
 /* the largest upstream preset also bounds Turtledeflate's int32 allocation arithmetic */
 #define MAX_BLOCK_SIZE 1000000
@@ -79,6 +91,47 @@ static uint32_t update_crc(uint32_t crc, const unsigned char *data, size_t size)
       crc = (crc >> 1) ^ (crc & 1 ? UINT32_C(0xedb88320) : 0);
   }
   return crc;
+}
+
+static void *ect_worker(void *argument)
+{
+  ECT_JOB *job = (ECT_JOB*)argument;
+  ZopfliOptions options;
+  unsigned char bit_position = 0;
+  ZopfliInitOptions(&options, 9, 0, 0);
+  ZopfliDeflate(&options, 1, job->input, job->input_size,
+    &bit_position, &job->output, &job->output_size);
+  free(job->input);
+  job->input = NULL;
+  return NULL;
+}
+
+/* start ECT while Turtledeflate processes the same stable input */
+static int start_ect_job(ECT_JOB *job, FILE *in, uint32_t size)
+{
+  int next;
+  memset(job, 0, sizeof(*job));
+  if(!size)
+    return 0;
+#if SIZE_MAX <= UINT32_MAX
+  if(size > SIZE_MAX - 16)
+    return 0;
+#endif
+  job->input = malloc((size_t)size + 16);
+  if(!job->input)
+    return 0;
+  if(fread(job->input, 1, size, in) != size)
+    return -1;
+  next = fgetc(in);
+  if(next != EOF || ferror(in) || fseek(in, 0, SEEK_SET))
+    return -1;
+  memset(job->input + size, 0, 16);
+  job->input_size = size;
+  job->crc = update_crc(UINT32_MAX, job->input, size) ^ UINT32_MAX;
+  if(pthread_create(&job->thread, NULL, ect_worker, job))
+    return 0;
+  job->started = 1;
+  return 0;
 }
 
 static int valid_name(const char *name)
@@ -251,6 +304,13 @@ static void progress_update(PROGRESS *progress, uint32_t done)
   progress->done = done;
   progress->block_size = 0;
   progress->pass = 0;
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_wait(PROGRESS *progress)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->block_size = 1;
   pthread_mutex_unlock(&progress->mutex);
 }
 
@@ -460,24 +520,45 @@ done:
   return status;
 }
 
+static int write_deflate_chunk(void *zip, FILE *temporary, const unsigned char *data, int size)
+{
+  if(temporary)
+    return fwrite(data, 1, (size_t)size, temporary) == (size_t)size ? 0 : -1;
+  return mz_zip_entry_write(zip, data, size) == size ? 0 : -1;
+}
+
 static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_config_t *config, PROGRESS *progress)
 {
   unsigned char *buffer;
   unsigned char *compressed;
   turtledeflate_config_t compressor_config = *config;
   mz_zip_file file_info;
+  ECT_JOB ect;
+  FILE *turtle_temp = NULL;
   void *compressor = NULL;
   uint32_t crc = UINT32_MAX;
   int64_t compressed_total = 0;
+  int64_t chosen_total;
   size_t size;
+  size_t transferred;
   int next;
   int compressed_size;
   int progress_started = 0;
+  int use_ect = 0;
   int status = -1;
 
+  memset(&ect, 0, sizeof(ect));
   buffer = malloc((size_t)config->i_maximum_block_size);
   if(!buffer)
     return -1;
+  if(config->i_compression_level == 9 && start_ect_job(&ect, in, entry->expected_size))
+    goto done;
+  if(ect.started)
+  {
+    turtle_temp = tmpfile();
+    if(!turtle_temp)
+      goto done;
+  }
   memset(&file_info, 0, sizeof(file_info));
   file_info.version_madeby = (3 << 8) | 20;
   file_info.version_needed = 20;
@@ -489,7 +570,7 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_co
   file_info.filename = entry->name;
   file_info.filename_size = entry->name_len;
   file_info.external_fa = entry->mode << 16;
-  if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+  if(!turtle_temp && mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
     goto done;
   size = fread(buffer, 1, (size_t)config->i_maximum_block_size, in);
   if(ferror(in))
@@ -513,7 +594,7 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_co
     entry->size += (uint32_t)size;
     progress_block(progress, (uint32_t)size);
     compressed_size = turtledeflate_block(compressor, (int32_t)size, buffer, &compressed, NULL, next == EOF);
-    if(compressed_size < 0 || mz_zip_entry_write(zip, compressed, compressed_size) != compressed_size)
+    if(compressed_size < 0 || write_deflate_chunk(zip, turtle_temp, compressed, compressed_size))
       goto done;
     compressed_total += compressed_size;
     progress_update(progress, entry->size);
@@ -526,16 +607,52 @@ static int write_entry(void *zip, ENTRY *entry, FILE *in, const turtledeflate_co
   if(!entry->size)
   {
     const unsigned char empty_deflate[] = {0x03, 0x00};
-    if(mz_zip_entry_write(zip, empty_deflate, sizeof(empty_deflate)) != (int32_t)sizeof(empty_deflate))
+    if(write_deflate_chunk(zip, turtle_temp, empty_deflate, sizeof(empty_deflate)))
       goto done;
     compressed_total = sizeof(empty_deflate);
   }
-  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, compressed_total, entry->size) != MZ_OK)
+  if(entry->size != entry->expected_size)
     goto done;
-  entry->compressed_size = (uint64_t)compressed_total;
+  chosen_total = compressed_total;
+  if(ect.started)
+  {
+    progress_wait(progress);
+    pthread_join(ect.thread, NULL);
+    ect.started = 0;
+    if(ect.crc != (crc ^ UINT32_MAX))
+      goto done;
+    use_ect = ect.output && ect.output_size < (uint64_t)compressed_total && ect.output_size <= UINT32_MAX;
+    if(use_ect)
+      chosen_total = (int64_t)ect.output_size;
+    if(mz_zip_entry_write_open(zip, &file_info, 6, 1, NULL) != MZ_OK)
+      goto done;
+    if(!use_ect && fseek(turtle_temp, 0, SEEK_SET))
+      goto done;
+    transferred = 0;
+    while(transferred < (size_t)chosen_total)
+    {
+      size_t chunk = (size_t)chosen_total - transferred;
+      if(chunk > 65536)
+        chunk = 65536;
+      if(!use_ect && fread(buffer, 1, chunk, turtle_temp) != chunk)
+        goto done;
+      if(mz_zip_entry_write(zip, use_ect ? ect.output + transferred : buffer, (int32_t)chunk) != (int32_t)chunk)
+        goto done;
+      transferred += chunk;
+    }
+  }
+  if(mz_zip_entry_write_close(zip, crc ^ UINT32_MAX, chosen_total, entry->size) != MZ_OK)
+    goto done;
+  entry->compressed_size = (uint64_t)chosen_total;
   status = 0;
 
 done:
+  if(ect.started)
+    pthread_join(ect.thread, NULL);
+  free(ect.input);
+  free(ect.output);
+  if(turtle_temp)
+    fclose(turtle_temp);
   if(compressor)
     turtledeflate_destroy(compressor);
   free(buffer);

@@ -1,12 +1,13 @@
 # turzip
 
-turzip creates ZIP files from regular files. It uses Turtledeflate to compress
-each file and minizip-ng to write ZIP containers. The program is written in C99.
+turzip creates ZIP files from regular files. It uses Turtledeflate and ECT's
+Zopfli variant to compress files, and minizip-ng to write ZIP containers.
+The turzip source is written in C99; ECT's code also needs a C++ compiler.
 
 ## Build
 
-Run `make`. This creates `./turzip`. You need a C compiler, `make`, `cmake`,
-`git`, and zlib development files.
+Run `make`. This creates `./turzip`. You need C and C++ compilers, `make`,
+`cmake`, `git`, and zlib development files.
 The build copies Turtledeflate into a temporary directory, applies
 `patches/turtledeflate.patch` there, then removes the directory. The original
 files in `third_party/turtledeflate` stay untouched. Keep `turzip.ini` next to
@@ -26,9 +27,12 @@ Run `make test` to build and run the archive integration tests.
 An optional `-1` to `-9` flag sets the compression level before the output path.
 Level 1 uses the least compression work, and level 9 uses the most. The default
 is level 7. A higher level can take much longer and does not always make a
-smaller archive. Level 9 uses the same compression settings and 1,000,000-byte
-input blocks as `turtledeflate --9`. It can use much more memory than the other
-levels. ZIP headers still add their own bytes to the archive.
+smaller archive. Level 9 runs Turtledeflate with the same settings and
+1,000,000-byte input blocks as `turtledeflate --9`, alongside ECT's Zopfli
+variant at ECT level 9. turzip stores whichever complete DEFLATE stream is
+smaller for each file. This preserves the original file bytes and needs more
+memory and temporary disk space than the other levels. ZIP headers still add
+their own bytes to the archive.
 
 All Turtledeflate settings come from `turzip.ini`. Each level has a section from
 `[turtledeflate-1]` through `[turtledeflate-9]`. You can edit the values before
@@ -59,7 +63,8 @@ with two decimal places on standard error. It refreshes once per second.
 Turtledeflate may revisit the same input block many times and cannot know in
 advance how many passes it will need. The percentage within a block is an
 estimate based on work already done; it reaches the exact block boundary when
-that block finishes.
+that block finishes. At level 9, the percentage follows Turtledeflate while
+ECT runs in parallel; it reaches 100% after both candidates finish.
 
 turzip writes to a temporary file and replaces an existing output only after
 the new archive is complete. It returns a nonzero exit status on
@@ -85,6 +90,12 @@ fixes memory cleanup and allocation failures in the temporary copy.
 
 `third_party/minizip-ng` writes the ZIP container. Its license is in
 `third_party/minizip-ng/LICENSE`.
+
+`third_party/ect` contains the original ECT Zopfli sources used at level 9.
+The build compiles them as separate C and C++ objects without editing the
+original files. ECT uses Apache-2.0; its license is in
+`third_party/ect/License.txt`. An LZ4-derived fragment in ECT carries a
+BSD-2-Clause notice, reproduced in `THIRD_PARTY_NOTICES`.
 
 turzip's own code uses the BSD-2-Clause license in `LICENSE`. Third-party
 notices are collected in `THIRD_PARTY_NOTICES`.
