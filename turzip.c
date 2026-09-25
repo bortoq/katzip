@@ -58,9 +58,12 @@ typedef struct {
   pthread_t thread;
   const ENTRY *entry;
   uint32_t done;
+  uint32_t block_size;
+  double pass_scale;
   uint32_t pass;
   uint32_t pass_done;
   uint32_t pass_total;
+  uint64_t displayed_percent;
   int display_width;
   int active;
   int stop;
@@ -173,23 +176,31 @@ static int valid_utf8(const char *name)
   return 1;
 }
 
-static void show_progress(PROGRESS *progress)
+static void show_progress(PROGRESS *progress, int timer_tick)
 {
   const ENTRY *entry = progress->entry;
-  uint32_t done = progress->done;
-  uint64_t percent = entry->expected_size ? (uint64_t)done * 10000 / entry->expected_size : 10000;
+  double done = progress->done;
+  double percent;
   int width;
   int i;
-  if(percent > 10000)
-    percent = 10000;
-  width = fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
-    (unsigned long long)(percent / 100), (unsigned long long)(percent % 100));
   if(progress->pass && progress->pass_total && done < entry->expected_size)
   {
-    uint64_t pass_percent = (uint64_t)progress->pass_done * 10000 / progress->pass_total;
-    width += fprintf(stderr, " (pass %u: %llu.%02llu%%)", progress->pass,
-      (unsigned long long)(pass_percent / 100), (unsigned long long)(pass_percent % 100));
+    double work = progress->pass - 1 + (double)progress->pass_done / progress->pass_total;
+    done += progress->block_size * work / (work + progress->pass_scale);
   }
+  percent = entry->expected_size ? done * 10000 / entry->expected_size : 10000;
+  if(progress->block_size && percent > 9999)
+    percent = 9999;
+  if(percent > 10000)
+    percent = 10000;
+  if((uint64_t)percent < progress->displayed_percent)
+    percent = progress->displayed_percent;
+  if(timer_tick && progress->block_size &&
+    (uint64_t)percent == progress->displayed_percent && progress->displayed_percent < 9999)
+    percent = progress->displayed_percent + 1;
+  progress->displayed_percent = (uint64_t)percent;
+  width = fprintf(stderr, "\r%s %llu.%02llu%%", entry->name,
+    (unsigned long long)(percent / 100), (unsigned long long)((uint64_t)percent % 100));
   for(i = width; i < progress->display_width; ++i)
     fputc(' ', stderr);
   progress->display_width = width;
@@ -212,7 +223,7 @@ static void *progress_thread(void *argument)
     ++deadline.tv_sec;
     result = pthread_cond_timedwait(&progress->condition, &progress->mutex, &deadline);
     if(result == ETIMEDOUT && progress->active)
-      show_progress(progress);
+      show_progress(progress, 1);
   }
   pthread_mutex_unlock(&progress->mutex);
   return NULL;
@@ -237,18 +248,29 @@ static int progress_init(PROGRESS *progress)
   return 0;
 }
 
-static void progress_start(PROGRESS *progress, const ENTRY *entry)
+static void progress_start(PROGRESS *progress, const ENTRY *entry, const turtledeflate_config_t *config)
 {
   pthread_mutex_lock(&progress->mutex);
   progress->entry = entry;
   progress->done = 0;
+  progress->block_size = 0;
+  progress->pass_scale = 2.0 * config->i_num_start_fp * config->i_max_block_splitter_iterations;
   progress->pass = 0;
   progress->pass_done = 0;
   progress->pass_total = 0;
+  progress->displayed_percent = 0;
   progress->display_width = 0;
   progress->active = 1;
-  show_progress(progress);
+  show_progress(progress, 0);
   pthread_cond_signal(&progress->condition);
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+static void progress_block(PROGRESS *progress, uint32_t size)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->block_size = size;
+  progress->pass = 0;
   pthread_mutex_unlock(&progress->mutex);
 }
 
@@ -256,6 +278,7 @@ static void progress_update(PROGRESS *progress, uint32_t done)
 {
   pthread_mutex_lock(&progress->mutex);
   progress->done = done;
+  progress->block_size = 0;
   progress->pass = 0;
   pthread_mutex_unlock(&progress->mutex);
 }
@@ -275,8 +298,9 @@ static void progress_finish(PROGRESS *progress, int success)
   pthread_mutex_lock(&progress->mutex);
   if(success)
     progress->done = progress->entry->expected_size;
+  progress->block_size = 0;
   progress->pass = 0;
-  show_progress(progress);
+  show_progress(progress, 0);
   fputc('\n', stderr);
   progress->active = 0;
   pthread_cond_signal(&progress->condition);
@@ -545,7 +569,7 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
     goto done;
   if(size && !turtledeflate_create(&compressor, &compressor_config))
     goto done;
-  progress_start(progress, entry);
+  progress_start(progress, entry, config);
   progress_started = 1;
   if(compressor)
     turtledeflate_set_progress_callback(compressor, progress_callback, progress);
@@ -560,6 +584,7 @@ static int write_entry(OUTPUT *out, ENTRY *entry, FILE *in, const turtledeflate_
       goto done;
     crc = update_crc(crc, buffer, size);
     entry->size += (uint32_t)size;
+    progress_block(progress, (uint32_t)size);
     compressed_size = turtledeflate_block(compressor, (int32_t)size, buffer, &compressed, NULL, next == EOF);
     if(compressed_size < 0 || write_bytes(out, compressed, (size_t)compressed_size))
       goto done;

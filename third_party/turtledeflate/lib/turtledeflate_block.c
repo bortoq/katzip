@@ -1025,12 +1025,6 @@ int32_t turtledeflate_block_deflate_squish_iter( turtledeflate_ctx_t *ps_turtle,
         f64_fp_scale = 1.0;
     }
 
-    if( ps_turtle->pf_progress )
-    {
-        ps_turtle->ui_progress_pass++;
-        ps_turtle->pf_progress( ps_turtle->p_progress_user, ps_turtle->ui_progress_pass, 0, ( uint32_t ) i_data_size );
-    }
-
     for( i_idx = 0; i_idx < i_data_size; i_idx++ )
     {
         i64_current_cost = ps_squish->rgps_trellis[ 0 ][ i_idx ].i64_cost;
@@ -1048,10 +1042,6 @@ int32_t turtledeflate_block_deflate_squish_iter( turtledeflate_ctx_t *ps_turtle,
             {
                 turtledeflate_try_add_squish_entry( ps_block, ps_squish, i_idx + i_sublen, i64_current_cost, i_sublen, pui16_sublen[ i_sublen ], f64_fp_scale );
             }
-        }
-        if( ps_turtle->pf_progress && ( ( ( i_idx + 1 ) & 4095 ) == 0 || i_idx + 1 == i_data_size ) )
-        {
-            ps_turtle->pf_progress( ps_turtle->p_progress_user, ps_turtle->ui_progress_pass, ( uint32_t ) ( i_idx + 1 ), ( uint32_t ) i_data_size );
         }
     }
 

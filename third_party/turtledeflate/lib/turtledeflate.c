@@ -35,10 +35,6 @@ bool turtledeflate_create( void **p_turtle, turtledeflate_config_t *ps_config )
 	turtledeflate_ctx_t *ps_turtle;
 
 	ps_turtle = malloc( sizeof( turtledeflate_ctx_t ) );
-	if( !ps_turtle )
-	{
-		return false;
-	}
 
 	memset( ps_turtle, 0, sizeof( turtledeflate_ctx_t ) );
 
@@ -63,32 +59,12 @@ bool turtledeflate_create( void **p_turtle, turtledeflate_config_t *ps_config )
 	ps_turtle->s_squish.rgps_trellis[ 0 ] = malloc( sizeof( turtledeflate_squish_entry_t ) * ( ps_config->i_maximum_block_size + 1 ) );
 	ps_turtle->s_squish.rgps_trellis[ 1 ] = malloc( sizeof( turtledeflate_squish_entry_t ) * ( ps_config->i_maximum_block_size + 1 ) );
 	ps_turtle->s_squish.pps_trace = malloc( sizeof( turtledeflate_squish_entry_t * ) * ( ps_config->i_maximum_block_size + 1 ) );
-	if( !ps_turtle->pui8_block_pre || !ps_turtle->pui8_compressed_block ||
-		!ps_turtle->ps_global_stream || !ps_turtle->ps_block_stream ||
-		!ps_turtle->ps_temp_stream || !ps_turtle->ps_final_stream ||
-		!ps_turtle->ps_global_hist || !ps_turtle->s_matches.pui16_len ||
-		!ps_turtle->s_matches.pui16_dist || !ps_turtle->s_matches.pui16_sublen ||
-		!ps_turtle->s_matches.pui_sublen_idx ||
-		!ps_turtle->s_squish.rgps_trellis[ 0 ] ||
-		!ps_turtle->s_squish.rgps_trellis[ 1 ] ||
-		!ps_turtle->s_squish.pps_trace )
-	{
-		turtledeflate_destroy( ps_turtle );
-		return false;
-	}
 
 	turtledeflate_bitstream_reset( &ps_turtle->s_bitstream, ps_turtle->pui8_compressed_block );
 
 	*p_turtle = ( void * ) ps_turtle;
 
 	return true;
-}
-
-void turtledeflate_set_progress_callback( void *p_turtle, turtledeflate_progress_callback_t callback, void *user )
-{
-	turtledeflate_ctx_t *ps_turtle = ( turtledeflate_ctx_t * ) p_turtle;
-	ps_turtle->pf_progress = callback;
-	ps_turtle->p_progress_user = user;
 }
 
 static int32_t i_sb_ctr = 0;
@@ -111,7 +87,6 @@ int32_t turtledeflate_block( void *p_turtle, int32_t i_size, uint8_t *pui8_block
 	int32_t rgi_best_from_start_fp[ TURTLEDEFLATE_MAX_NUM_FP_START ];
 
 	ps_turtle->i_blocksplitter_state = 0;
-	ps_turtle->ui_progress_pass = 0;
 
 	
 	memcpy( pui8_block, pui8_block_, i_size * sizeof( uint8_t ) ); /* append to pre */
@@ -400,24 +375,7 @@ int32_t turtledeflate_block( void *p_turtle, int32_t i_size, uint8_t *pui8_block
 }
 
 
-void turtledeflate_destroy(void *p_turtle)
+void turtledeflate_destroy( void *p_turtle )
 {
-  turtledeflate_ctx_t *ps_turtle = (turtledeflate_ctx_t*)p_turtle;
-  if(!ps_turtle)
-    return;
-  free(ps_turtle->s_squish.pps_trace);
-  free(ps_turtle->s_squish.rgps_trellis[1]);
-  free(ps_turtle->s_squish.rgps_trellis[0]);
-  free(ps_turtle->s_matches.pui_sublen_idx);
-  free(ps_turtle->s_matches.pui16_sublen);
-  free(ps_turtle->s_matches.pui16_dist);
-  free(ps_turtle->s_matches.pui16_len);
-  free(ps_turtle->ps_global_hist);
-  free(ps_turtle->ps_final_stream);
-  free(ps_turtle->ps_temp_stream);
-  free(ps_turtle->ps_block_stream);
-  free(ps_turtle->ps_global_stream);
-  free(ps_turtle->pui8_compressed_block);
-  free(ps_turtle->pui8_block_pre);
-  free(ps_turtle);
+	/* free em ! */
 }

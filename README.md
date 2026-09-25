@@ -5,8 +5,11 @@ each file. The program is written in C99.
 
 ## Build
 
-Run `make`. This creates `./turzip`. You need a C compiler and `make`.
-Keep `turzip.ini` next to the executable.
+Run `make`. This creates `./turzip`. You need a C compiler, `make`, and `git`.
+The build copies Turtledeflate into a temporary directory, applies
+`patches/turtledeflate.patch` there, then removes the directory. The original
+files in `third_party/turtledeflate` stay untouched. Keep `turzip.ini` next to
+the executable.
 
 ## Use
 
@@ -44,11 +47,12 @@ file for that file's extension. For more specific masks, pass the mask
 literally so turzip can see its full pattern. Symbolic links found while
 walking directories are skipped.
 
-While compressing, turzip shows each file name and its completed percentage to
-two decimal places on standard error. It refreshes the display once per second.
-The file percentage advances after each compression block. During a block,
-turzip also shows the current Turtledeflate pass and the percentage scanned in
-that pass. Pass percentages restart at zero as the compressor tries new passes.
+While compressing, turzip shows each file name and one increasing percentage
+with two decimal places on standard error. It refreshes once per second.
+Turtledeflate may revisit the same input block many times and cannot know in
+advance how many passes it will need. The percentage within a block is an
+estimate based on work already done; it reaches the exact block boundary when
+that block finishes.
 
 turzip replaces an existing output file. It returns a nonzero exit status on
 error. Without `-r`, it does not accept directories. Absolute input paths and
@@ -63,8 +67,8 @@ time to process.
 ## Third-party code
 
 `third_party/turtledeflate` provides DEFLATE compression. Its license is in
-`third_party/turtledeflate/LICENSE`. The local copy includes a fix for memory
-cleanup and allocation failures.
+`third_party/turtledeflate/LICENSE`. The build patch adds progress reports and
+fixes memory cleanup and allocation failures in the temporary copy.
 
 `third_party/gz2zip/gz2zip.c` is a ZIP format reference. It is not linked into
 turzip. Its license notice is at the top of that file.

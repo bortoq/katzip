@@ -87,10 +87,6 @@ typedef struct
 } turtledeflate_superblock_stats_t;
 
 
-typedef void (*turtledeflate_progress_callback_t)(void *user, uint32_t pass, uint32_t completed, uint32_t total);
-
-void turtledeflate_set_progress_callback(void *p_turtle, turtledeflate_progress_callback_t callback, void *user);
-
 bool turtledeflate_create( void **p_turtle, turtledeflate_config_t *ps_config );
 
 int32_t turtledeflate_block( void *p_turtle, int32_t i_size, uint8_t *pui8_block_, uint8_t **pui8_out_block, turtledeflate_superblock_stats_t *ps_stats, bool b_last );
