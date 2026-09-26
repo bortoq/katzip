@@ -25,6 +25,21 @@ class KatzipTests(unittest.TestCase):
             [str(PROGRAM), *arguments], cwd=self.root, capture_output=True, **kwargs
         )
 
+    def default_ini(self):
+        binary_dir = self.root / "defaults"
+        binary_dir.mkdir()
+        binary = binary_dir / "katzip"
+        shutil.copy2(PROGRAM, binary)
+        (binary_dir / "input.txt").write_text("default settings")
+        environment = dict(os.environ)
+        environment.pop("KATZIP_INI", None)
+        result = subprocess.run(
+            [str(binary), "-1", "archive", "input.txt"],
+            cwd=binary_dir, env=environment, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (binary_dir / "katzip.ini").read_text()
+
     def test_utf8_empty_file_and_exact_zip_overhead(self):
         name = "текст.fb2"
         (self.root / name).write_bytes(b"")
@@ -68,6 +83,48 @@ class KatzipTests(unittest.TestCase):
         result = self.run_katzip()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stderr.decode(), expected)
+        result = self.run_katzip("--print-default-ini")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"unknown option", result.stderr)
+
+    def test_options_can_follow_archive_and_inputs(self):
+        (self.root / "one.txt").write_text("one " * 1000)
+        (self.root / "two.txt").write_text("two")
+        (self.root / "-dash.txt").write_text("dash")
+        (self.root / "nested").mkdir()
+        (self.root / "nested" / "deep.txt").write_text("deep")
+
+        result = self.run_katzip(
+            "mixed", "one.txt", "-1", "two.txt", "--", "-dash.txt"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "mixed.zip") as archive:
+            self.assertEqual(archive.namelist(),
+                             ["one.txt", "two.txt", "-dash.txt"])
+            self.assertEqual(archive.getinfo("one.txt").flag_bits & 0x0006,
+                             0x0006)
+
+        result = self.run_katzip(
+            "recursive", "nested", "@*.txt", "-r", "-1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "recursive.zip") as archive:
+            self.assertEqual(archive.namelist(), ["nested/deep.txt"])
+
+        result = self.run_katzip("--", "-archive", "-dash.txt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "-archive.zip") as archive:
+            self.assertEqual(archive.read("-dash.txt"), b"dash")
+
+        result = self.run_katzip("invalid", "one.txt", "-unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"unknown option", result.stderr)
+        self.assertFalse((self.root / "invalid.zip").exists())
+
+        result = self.run_katzip("help-only", "one.txt", "--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"Usage:", result.stdout)
+        self.assertFalse((self.root / "help-only.zip").exists())
 
     def test_no_inputs_uses_star_mask_at_selected_depth(self):
         (self.root / "top.txt").write_text("top")
@@ -250,9 +307,7 @@ class KatzipTests(unittest.TestCase):
         (self.root / "input.txt").write_text("test")
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         for key, replacement in (
             ("turtledeflate_i_maximum_block_size = 1000000",
              "turtledeflate_i_maximum_block_size = 1000001"),
@@ -269,9 +324,7 @@ class KatzipTests(unittest.TestCase):
         (self.root / "input.txt").write_text("A repeated sentence. " * 100)
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         for level in (7, 8, 9):
             section = f"[{level}]\n"
             head, rest = defaults.split(section, 1)
@@ -303,9 +356,7 @@ class KatzipTests(unittest.TestCase):
     def test_size_threshold_and_compressor_selection(self):
         content = b"abc xyz abc xyz " * 500
         (self.root / "input.txt").write_bytes(content)
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
         start = defaults.index("[7]\n")
@@ -334,9 +385,7 @@ class KatzipTests(unittest.TestCase):
     def test_multiple_compressors_compete_without_extra_zip_data(self):
         content = (b"Text with repeated phrases and changing numbers. " * 80)
         (self.root / "input.txt").write_bytes(content)
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
         start = defaults.index("[7]\n")
@@ -368,9 +417,7 @@ class KatzipTests(unittest.TestCase):
     def test_turtle_only_and_zlib_only_sections(self):
         content = b"Separate compressor settings. " * 120
         (self.root / "input.txt").write_bytes(content)
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
         head, level_nine = defaults.split("[9]\n", 1)
@@ -396,9 +443,7 @@ class KatzipTests(unittest.TestCase):
     def test_invalid_ini_line_after_valid_settings_is_rejected(self):
         (self.root / "input.txt").write_text("data")
         config = self.root / "broken.ini"
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         environment = dict(os.environ, KATZIP_INI=str(config))
         broken_configs = (
             defaults.replace("[2]", "bad = 1\n[2]", 1),
@@ -420,9 +465,7 @@ class KatzipTests(unittest.TestCase):
         document_dir.mkdir()
         shutil.copy2(PROGRAM, binary_dir / "katzip")
         (document_dir / "input.txt").write_text("Repeated input. " * 100)
-        defaults = subprocess.run(
-            [str(PROGRAM), "--print-default-ini"], capture_output=True, check=True
-        ).stdout.decode()
+        defaults = self.default_ini()
         self.assertIn("[7]\nzopfli_numiterations = 13", defaults)
         self.assertIn("[8]\nzopfli_numiterations = 60", defaults)
         self.assertIn("[9]\nzopfli_numiterations = 60", defaults)

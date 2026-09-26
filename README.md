@@ -26,14 +26,20 @@ Run `make test` to build and run the archive integration tests.
 ./katzip -1 archive            # add matching files from the current directory
 ./katzip -r backup              # also search subdirectories
 ./katzip -r -9 texts @*.txt @*.fb2
+./katzip texts @*.txt -r -9  # options can follow the archive and mask
+./katzip archive -- -leading-name.txt
 ./katzip --help
 ```
 
 `--help` and `-h` print the v1.1 usage message. An archive name is required.
+Options may appear before or after the archive name and input files. The first
+argument that is not an option is the archive name; later such arguments are
+inputs. Use the existing `--` separator before a file name beginning with `-`,
+or prefix that name with `./`. After `--`, all arguments are file names.
 When no input is given, katzip uses the `@*` mask. Without `-r`, masks search
 only the current directory. With `-r`, they also search subdirectories.
 
-An optional `-1` to `-9` flag selects one INI section before the output path.
+An optional `-1` to `-9` flag selects one INI section from any position.
 The default is level 7. The built-in settings use libdeflate for files under
 64 MiB at levels 1-6 and streaming zlib for larger files. Levels 7-8 use ECT;
 level 9 compares ECT and Turtledeflate and keeps the smaller raw DEFLATE
@@ -77,13 +83,13 @@ You can edit the INI; katzip will not overwrite an existing one. Older INI
 formats must be replaced or converted to numbered sections. If katzip cannot
 create a new INI, it warns and uses its compiled settings. `KATZIP_INI`
 selects an explicit file and requires that file to exist. A missing or invalid
-selected section is an error. `--print-default-ini` prints the compiled
-settings without creating a file. Unsafe settings are rejected before an
-archive is created.
+selected section is an error. To regenerate defaults, rename the existing
+`katzip.ini` beside the executable; katzip creates a new one on the next
+archive run. Unsafe settings are rejected before an archive is created.
 
 If the output name has no extension, katzip adds `.zip`. A name with an
-extension is used as given. Each later argument is a file to add. The file
-keeps its relative path inside the archive. UTF-8 file names are marked as
+extension is used as given. Each later non-option argument is a file to add.
+The file keeps its relative path inside the archive. UTF-8 file names are marked as
 UTF-8 in the ZIP headers.
 
 Use `-r` to visit all regular files in each named directory and its
@@ -140,8 +146,8 @@ one compressor or the comparison path.
 `publish_archive` changes its permissions, flushes it, then replaces the output.
 
 Resources belong to the function or context that creates them. `TURTLE_WORK`
-owns Turtledeflate's buffers, compressor, temporary stream and optional ECT
-thread. `ARCHIVE_OUTPUT` owns the temporary archive, ZIP reader and writer,
+owns Turtledeflate's buffers, compressor and optional temporary stream.
+`ARCHIVE_OUTPUT` owns the temporary archive, ZIP reader and writer,
 progress thread and signal handlers. During a comparison, each `CANDIDATE`
 owns its compressed buffer or temporary stream. The corresponding cleanup
 functions run on both success and failure. Third-party sources remain

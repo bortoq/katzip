@@ -2018,6 +2018,7 @@ typedef struct {
   int level;
   int recursive;
   int archive_arg;
+  int argument_count;
 } OPTIONS;
 
 typedef struct {
@@ -2034,49 +2035,54 @@ typedef struct {
   sigset_t interrupt_mask;
 } ARCHIVE_OUTPUT;
 
-/* A positive result means a help or defaults request was handled. */
+/* Keep positional arguments in order while accepting options anywhere. */
 static int parse_options(int argc, char **argv, OPTIONS *options)
 {
+  int next_position = 1;
+  int options_done = 0;
+  int i;
   options->level = 7;
   options->recursive = 0;
   options->archive_arg = 1;
-  while(options->archive_arg < argc &&
-    argv[options->archive_arg][0] == '-')
+  for(i = 1; i < argc; ++i)
   {
-    const char *argument = argv[options->archive_arg];
-    if(strcmp(argument, "--print-default-ini") == 0)
+    const char *argument = argv[i];
+    if(!options_done && strcmp(argument, "--") == 0)
     {
-      if(write_default_ini(stdout) || fflush(stdout) == EOF)
-      {
-        fprintf(stderr, "katzip: cannot write default settings\n");
-        return -1;
-      }
-      return 1;
+      options_done = 1;
+      continue;
     }
-    if(strcmp(argument, "--help") == 0 ||
-      strcmp(argument, "-h") == 0)
+    if(!options_done && strcmp(argument, "--help") == 0)
     {
       print_help(stdout);
       return 1;
     }
-    if(strcmp(argument, "--") == 0)
+    if(!options_done && strcmp(argument, "-h") == 0)
     {
-      ++options->archive_arg;
-      break;
+      print_help(stdout);
+      return 1;
     }
-    if(strcmp(argument, "-r") == 0)
+    if(!options_done && strcmp(argument, "-r") == 0)
+    {
       options->recursive = 1;
-    else if(argument[1] >= '1' && argument[1] <= '9' &&
+      continue;
+    }
+    if(!options_done && argument[0] == '-' &&
+      argument[1] >= '1' && argument[1] <= '9' &&
       !argument[2])
+    {
       options->level = argument[1] - '0';
-    else
+      continue;
+    }
+    if(!options_done && argument[0] == '-')
     {
       fprintf(stderr, "katzip: unknown option: %s\n", argument);
       return -1;
     }
-    ++options->archive_arg;
+    argv[next_position++] = argv[i];
   }
-  if(options->archive_arg == argc)
+  options->argument_count = next_position;
+  if(next_position == options->archive_arg)
   {
     print_help(stderr);
     return -1;
@@ -2364,7 +2370,7 @@ static int publish_archive(ARCHIVE_OUTPUT *output,
   return 0;
 }
 
-static int run_archive(int argc, char **argv, const OPTIONS *options,
+static int run_archive(char **argv, const OPTIONS *options,
   const COMPRESSION_CONFIG *config)
 {
   ENTRY_LIST list = {0};
@@ -2379,7 +2385,7 @@ static int run_archive(int argc, char **argv, const OPTIONS *options,
   }
   list.archive_exists = stat(archive_path, &list.archive_stat) == 0;
   mode = archive_mode(&list);
-  result = collect_entries(&list, argc, argv, options);
+  result = collect_entries(&list, options->argument_count, argv, options);
   if(!result)
     result = create_temporary_archive(&output, archive_path);
   if(!result)
@@ -2419,5 +2425,5 @@ int main(int argc, char **argv)
     return result < 0 ? 1 : 0;
   if(load_config(argv[0], options.level, &config))
     return 1;
-  return run_archive(argc, argv, &options, &config);
+  return run_archive(argv, &options, &config);
 }
