@@ -13,10 +13,14 @@ The katzip source is written in C99; ECT's code also needs a C++ compiler.
 Run `make`. This creates `./katzip`. You need C and C++ compilers, `make`,
 `cmake`, `git`, zlib development files, and libdeflate development files
 (for example, `zlib1g-dev` and `libdeflate-dev` on Debian).
-The build copies Turtledeflate into a temporary directory, applies
-`patches/turtledeflate.patch` there, then removes the directory. The original
-files in `third_party/turtledeflate` stay untouched.
+The build copies Turtledeflate and ECT into a temporary directory, applies
+the patches from `patches/` there, then removes the directory. The original
+files in `third_party/` stay untouched.
 Run `make test` to build and run the archive integration tests.
+`make asan` builds a separate AddressSanitizer/UndefinedBehaviorSanitizer
+binary and runs the tests against it. `make tsan` does the same with
+ThreadSanitizer. `make distclean` removes build binaries but preserves
+`katzip.ini`, which may contain user edits.
 
 The `src/` directory separates command-line parsing, input discovery,
 configuration, progress reporting, ZIP entries, and the compression engines.
@@ -131,7 +135,8 @@ percentage with two decimal places. The percentage refreshes every second and st
 below 100% until every file is written. After a file completes, its active
 line becomes a stable line with its compression ratio:
 `100 * compressed_size / original_size`. Names are padded so percentages
-align, including for UTF-8 Cyrillic names. An empty file has a 0.00% ratio;
+align, including for UTF-8 Cyrillic, CJK, and single-code-point emoji.
+An empty file has a 0.00% ratio;
 a stored file has a 100.00% ratio. In parallel mode, each completed compressor
 contributes an equal share of its file's original size. libdeflate and ECT
 do not report work inside a compression pass, so updates between completed
@@ -144,7 +149,9 @@ exit status on error. Without `-r`, it does not accept directories. Absolute
 input paths and `..` path components are not accepted. Repeated files found during a recursive
 search are added only once.
 
-This program writes standard ZIP files without ZIP64. An archive and each
+This program writes standard ZIP files without ZIP64. The container size
+check and compressor input types assume 32-bit sizes, so simply enabling
+Zip64 in minizip-ng would not support larger files. An archive and each
 input file must be smaller than 4 GiB. The archive can contain at most 65,535
 files. Turtledeflate favors compression over speed, so level 9 can take
 time to process. Levels 1-6 may use roughly twice the input file size in memory
@@ -182,15 +189,16 @@ The system libdeflate library provides fast raw DEFLATE compression at levels
 included in this repository.
 
 `third_party/turtledeflate` provides DEFLATE compression. Its license is in
-`third_party/turtledeflate/LICENSE`. The build patch adds progress reports and
-fixes memory cleanup and allocation failures in the temporary copy.
+`third_party/turtledeflate/LICENSE`. The temporary-copy patches add progress
+reports, fix memory cleanup and allocation failures, and guard the Deflate
+length lookup against reserved symbols 286 and 287.
 
 `third_party/minizip-ng` writes the ZIP container. Its license is in
 `third_party/minizip-ng/LICENSE`.
 
 `third_party/ect` contains the original ECT Zopfli sources used at levels 7-9.
-The build compiles them as separate C and C++ objects without editing the
-original files. ECT uses Apache-2.0; its license is in
+The build patches unaligned match reads in a temporary copy, then compiles
+its C and C++ objects. ECT uses Apache-2.0; its license is in
 `third_party/ect/License.txt`. An LZ4-derived fragment in ECT carries a
 BSD-2-Clause notice, reproduced in `THIRD_PARTY_NOTICES`.
 

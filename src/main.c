@@ -1,10 +1,13 @@
 #include "katzip_internal.h"
+#include <locale.h>
 
 int main(int argc, char **argv)
 {
   OPTIONS options;
   COMPRESSION_CONFIG config;
-  int result = scan_options(argc, argv, &options);
+  int result;
+  setlocale(LC_CTYPE, "");
+  result = scan_options(argc, argv, &options);
   if(result)
     return result < 0 ? 1 : 0;
   if(load_config(argv[0], options.level, &config, &options))

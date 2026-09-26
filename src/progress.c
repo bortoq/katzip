@@ -1,7 +1,8 @@
 #include "katzip_internal.h"
+#include <wchar.h>
 
-/* UTF-8 continuation bytes do not occupy another terminal column. */
-static int name_columns(const char *name)
+/* Count terminal columns, with a UTF-8 fallback for a single-byte locale. */
+static int utf8_columns(const char *name)
 {
   const unsigned char *byte = (const unsigned char*)name;
   int columns = 0;
@@ -10,6 +11,34 @@ static int name_columns(const char *name)
     if((*byte & 0xc0) != 0x80)
       ++columns;
     ++byte;
+  }
+  return columns;
+}
+
+static int name_columns(const char *name)
+{
+  mbstate_t state = {0};
+  const char *next = name;
+  int columns = 0;
+  if(MB_CUR_MAX == 1)
+    return utf8_columns(name);
+  while(*next)
+  {
+    wchar_t character;
+    size_t length = mbrtowc(&character, next, MB_CUR_MAX, &state);
+    int width;
+    if(length == (size_t)-1 || length == (size_t)-2)
+    {
+      memset(&state, 0, sizeof(state));
+      ++columns;
+      ++next;
+      continue;
+    }
+    if(length == 0)
+      break;
+    width = wcwidth(character);
+    columns += width < 0 ? 1 : width;
+    next += length;
   }
   return columns;
 }

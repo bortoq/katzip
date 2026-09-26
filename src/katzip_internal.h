@@ -1,6 +1,8 @@
 #ifndef KATZIP_INTERNAL_H
 #define KATZIP_INTERNAL_H
 
+#define _XOPEN_SOURCE 700
+#define _DEFAULT_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>

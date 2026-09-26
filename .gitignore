@@ -1,4 +1,6 @@
 /katzip
+/katzip-asan
+/katzip-tsan
 __pycache__/
 *.pyc
 /katzip.ini

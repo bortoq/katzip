@@ -1,0 +1,79 @@
+diff --git a/zopfli/match.h b/zopfli/match.h
+--- a/zopfli/match.h
++++ b/zopfli/match.h
+@@ -16,6 +16,8 @@
+  safe_end is a few (8) bytes before end, for comparing multiple bytes at once.
+  */
+ #include <stdint.h>
++#include <stddef.h>
++#include <string.h>
+ 
+ #if defined(__GNUC__) || defined(__clang__)
+   #define _RESTRICT __restrict__
+@@ -23,6 +25,22 @@
+   #define _RESTRICT __restrict
+ #else
+   #define _RESTRICT
++#endif
++
++static inline uint64_t LoadMatchWord(const unsigned char* address) {
++  uint64_t word;
++  memcpy(&word, address, sizeof(word));
++  return word;
++}
++
++#ifdef __GNUC__
++static inline unsigned FirstDifferentByte(uint64_t difference) {
++#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++  return (unsigned)(__builtin_clzll(difference) >> 3);
++#else
++  return (unsigned)(__builtin_ctzll(difference) >> 3);
++#endif
++}
+ #endif
+ 
+ #ifdef __GNUC__
+@@ -42,20 +60,20 @@
+    * end of the data whenever ZopfliDeflate is called.
+    */
+   do {
+-    uint64_t sv = *(uint64_t*)(void*)scan;
+-    uint64_t mv = *(uint64_t*)(void*)match;
++    uint64_t sv = LoadMatchWord(scan);
++    uint64_t mv = LoadMatchWord(match);
+     uint64_t xor = sv ^ mv;
+     if (xor) {
+-      scan += (__builtin_ctzll(xor) >> 3);
++      scan += FirstDifferentByte(xor);
+       break;
+     }
+     scan += 8;
+     match += 8;
+-    sv = *(uint64_t*)(void*)scan;
+-    mv = *(uint64_t*)(void*)match;
++    sv = LoadMatchWord(scan);
++    mv = LoadMatchWord(match);
+     xor = sv ^ mv;
+     if (xor) {
+-      scan += (__builtin_ctzll(xor) >> 3);
++      scan += FirstDifferentByte(xor);
+       break;
+     }
+     scan += 8;
+@@ -70,14 +88,14 @@
+ 
+   if (sizeof(size_t) == 8) {
+     /* 8 checks at once per array bounds check (size_t is 64-bit). */
+-    while (scan < safe_end && *((size_t*)scan) == *((size_t*)match)) {
++    while (scan < safe_end && memcmp(scan, match, sizeof(size_t)) == 0) {
+       scan += 8;
+       match += 8;
+     }
+   } else if (sizeof(unsigned) == 4) {
+     /* 4 checks at once per array bounds check (unsigned is 32-bit). */
+     while (scan < safe_end
+-           && *((unsigned*)scan) == *((unsigned*)match)) {
++           && memcmp(scan, match, sizeof(unsigned)) == 0) {
+       scan += 4;
+       match += 4;
+     }

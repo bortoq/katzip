@@ -1,0 +1,12 @@
+diff --git a/lib/turtledeflate_block.c b/lib/turtledeflate_block.c
+--- a/lib/turtledeflate_block.c
++++ b/lib/turtledeflate_block.c
+@@ -147,6 +147,8 @@
+ 
+ int32_t turtledeflate_get_len_extra_bits( int32_t i_lens )
+ {
++    if( i_lens < 257 || i_lens > 285 )
++        return 0;
+     return ( int32_t ) rgui8_len_extra_bits_table[ i_lens - 257 ];
+ }
+ 

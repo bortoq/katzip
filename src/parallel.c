@@ -186,10 +186,18 @@ static void stop_scheduler(SCHEDULER *scheduler)
   free(scheduler->threads);
 }
 
-static void submit_slot(SCHEDULER *scheduler, FILE_SLOT *slot)
+static int submit_slot(SCHEDULER *scheduler, FILE_SLOT *slot)
 {
   int i;
   pthread_mutex_lock(&scheduler->mutex);
+  if(scheduler->count > scheduler->capacity ||
+    (size_t)slot->task_count > scheduler->capacity - scheduler->count)
+  {
+    scheduler->failed = 1;
+    pthread_cond_broadcast(&scheduler->changed);
+    pthread_mutex_unlock(&scheduler->mutex);
+    return -1;
+  }
   for(i = 0; i < slot->task_count; ++i)
   {
     scheduler->queue[scheduler->tail] = &slot->tasks[i];
@@ -198,6 +206,7 @@ static void submit_slot(SCHEDULER *scheduler, FILE_SLOT *slot)
   }
   pthread_cond_broadcast(&scheduler->changed);
   pthread_mutex_unlock(&scheduler->mutex);
+  return 0;
 }
 
 static int wait_for_slot(SCHEDULER *scheduler, FILE_SLOT *slot)
@@ -220,7 +229,8 @@ static int fill_window(SCHEDULER *scheduler, FILE_SLOT *slots,
     FILE_SLOT *slot = &slots[*prepared % window];
     if(prepare_slot(slot, &list->entries[*prepared], config))
       return -1;
-    submit_slot(scheduler, slot);
+    if(submit_slot(scheduler, slot))
+      return -1;
     ++*prepared;
   }
   return 0;

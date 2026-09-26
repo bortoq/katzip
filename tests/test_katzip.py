@@ -12,7 +12,10 @@ import unittest
 import zipfile
 
 
-PROGRAM = pathlib.Path(__file__).resolve().parents[1] / "katzip"
+PROGRAM = pathlib.Path(os.environ.get(
+    "KATZIP_PROGRAM", pathlib.Path(__file__).resolve().parents[1] / "katzip"
+))
+TEST_TIMEOUT_SCALE = int(os.environ.get("KATZIP_TEST_TIMEOUT_SCALE", "1"))
 
 
 class KatzipTests(unittest.TestCase):
@@ -218,6 +221,31 @@ class KatzipTests(unittest.TestCase):
         self.assertNotIn("overall", result.stderr.decode())
         self.assertNotIn("▁", result.stderr.decode())
 
+    def test_completed_lines_align_wide_utf8_names(self):
+        import locale
+        previous = locale.setlocale(locale.LC_CTYPE)
+        try:
+            locale.setlocale(locale.LC_CTYPE, "C.UTF-8")
+        except locale.Error:
+            self.skipTest("C.UTF-8 locale is unavailable")
+        finally:
+            locale.setlocale(locale.LC_CTYPE, previous)
+        names = ["漢字.txt", "ascii.txt"]
+        for name in names:
+            (self.root / name).write_bytes(b"image data " * 100)
+        environment = dict(os.environ, LC_ALL="C.UTF-8")
+        result = self.run_katzip("-1", "archive", *names, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        completed = re.findall(r"\r([^\r\n]+)\n", result.stderr.decode())
+        self.assertEqual(len(completed), 2)
+        positions = []
+        for line in completed:
+            match = re.search(r"\d+\.\d{2}%", line)
+            self.assertIsNotNone(match)
+            prefix = line[:match.start()]
+            positions.append(len(prefix) + sum(char in "漢字" for char in prefix))
+        self.assertEqual(positions[0], positions[1])
+
     def test_existing_archive_survives_write_error(self):
         old = self.root / "archive.zip"
         old.write_bytes(b"previous archive")
@@ -340,7 +368,7 @@ class KatzipTests(unittest.TestCase):
                   for index in range(3)}
         for name, content in inputs.items():
             (self.root / name).write_bytes(content)
-        result = self.run_katzip("-9", "archive", *inputs, timeout=30)
+        result = self.run_katzip("-9", "archive", *inputs, timeout=30 * TEST_TIMEOUT_SCALE)
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
             self.assertEqual(opened.namelist(), list(inputs))
@@ -361,7 +389,7 @@ class KatzipTests(unittest.TestCase):
             name = f"part{index}.bin"
             (self.root / name).write_bytes(content)
             inputs[name] = content
-        result = self.run_katzip("-7", "archive", *inputs, timeout=30)
+        result = self.run_katzip("-7", "archive", *inputs, timeout=30 * TEST_TIMEOUT_SCALE)
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "archive.zip") as opened:
             for name, content in inputs.items():
