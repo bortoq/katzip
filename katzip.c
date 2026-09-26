@@ -2007,11 +2007,35 @@ static void free_entries(ENTRY_LIST *list)
 
 static void print_help(FILE *stream)
 {
-  fputs("KATZip v1.1 - Deflating with extreme devotion.\n"
-    "Dedicated to the memory of Phil Katz (1962-2000), the father of ZIP.\n"
+  fputs("KATZip v1.1 — Deflating with extreme devotion.\n"
+    "Dedicated to the memory of Phil Katz (1962–2000), the father of ZIP.\n"
     "\n"
-    "Usage:   katzip [-1..-9] [-r] <archive.zip> [[@]input_files...]\n"
-    "Example: katzip APPNOTE APPNOTE.TXT\n", stream);
+    "Usage:\n"
+    "  katzip [options] <archive[.zip]> [input ...]\n"
+    "\n"
+    "Options:\n"
+    "  -1 ... -9   Compression level (default: -7).\n"
+    "  -r          Search directories recursively.\n"
+    "  -h, --help  Show this help.\n"
+    "  --          Treat all following arguments as input names.\n"
+    "\n"
+    "Input:\n"
+    "  file        Add a file.\n"
+    "  directory   Add files from this directory with -r.\n"
+    "  @mask       Add files matching a mask; with -r, search subdirectories.\n"
+    "              Multiple masks may be supplied.\n"
+    "\n"
+    "If input is omitted, @* is used. If the archive name has no extension,\n"
+    ".zip is added. Options may appear anywhere before --.\n"
+    "\n"
+    "Examples:\n"
+    "  katzip archive report.txt\n"
+    "  katzip -r backup documents @*.txt\n"
+    "  katzip texts @*.txt @*.fb2 -9\n"
+    "  katzip archive -- -report.txt\n"
+    "\n"
+    "Environment:\n"
+    "  KATZIP_INI  Path to a specific compression settings file.\n", stream);
 }
 
 typedef struct {
