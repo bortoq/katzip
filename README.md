@@ -33,9 +33,12 @@ configuration, progress reporting, ZIP entries, and the compression engines.
 ./katzip texts @*.txt -r -9  # options can follow the archive and mask
 ./katzip archive -- -leading-name.txt
 ./katzip --help
+./katzip --full-help
+./katzip -7 archive file.txt --zopfli_numiterations 20
 ```
 
-`--help` and `-h` print the v1.1 usage message. An archive name is required.
+`--help` and `-h` print the v1.1 usage message. `--full-help`
+lists every compression setting and its meaning. An archive name is required.
 Options may appear before or after the archive name and input files. The first
 argument that is not an option is the archive name; later such arguments are
 inputs. Use the existing `--` separator before a file name beginning with `-`,
@@ -47,8 +50,12 @@ An optional `-1` to `-9` flag selects one INI section from any position.
 The default is level 7. The built-in settings use libdeflate for files under
 64 MiB at levels 1-6 and streaming zlib for larger files. Levels 7-8 use ECT;
 level 9 compares ECT and Turtledeflate and keeps the smaller raw DEFLATE
-stream. A higher level can take much longer and does not always make a smaller
-archive. Competing compressors need more memory and temporary disk space.
+stream. With multiple input files, katzip schedules each configured compressor
+as a separate task in a bounded worker pool, then writes ZIP entries in input
+order. The pool uses the available CPU count and reserves part of available
+memory for concurrent encoders. The same scheduling applies when an INI
+section enables a compressor competition. A higher level can take much longer
+and does not always make a smaller archive. Competing compressors need more memory and temporary disk space.
 ZIP headers add their own bytes to the archive.
 
 For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
@@ -56,40 +63,52 @@ For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
 the key and the compressor name are not stored in the archive. Stored entries
 leave the DEFLATE hint bits clear.
 
-Default compression settings are tables in `src/config_defaults.c`. On the
+Default compression presets are tables in `src/defaults.h`. On the
 first archive run, katzip checks for `katzip.ini` in the current directory and
 then next to its executable, including when launched through `PATH`. If neither
 exists, katzip creates `katzip.ini` next to the executable. The working
 directory receives a new INI only when it is also the executable directory.
 
-The INI has one section per command-line level, `[1]` through `[9]`. A
-`libdeflate_level` setting enables libdeflate. A complete `zopfli_*` group
-enables ECT. A complete `turtledeflate_*` group enables Turtledeflate. When
-more than one compressor group is present, katzip runs them on the same file
-and writes the shortest result. An incomplete group, duplicate setting or
-unknown setting in the selected section is an error. Turtledeflate's
-`i_compression_level` describes that compressor's work and need not match the
-INI section number.
+The INI has one section per command-line level, `[1]` through `[9]`.
+Each section is a list of command-line options, one per line, such as
+`--zopfli_numiterations 20`. A section ends at the next section header or
+end of file. The program first selects the final `-1` through `-9` option
+from the command line (default `-7`), then reads only that INI section.
+Options from other sections are ignored. Compression options on the command
+line may appear before or after the archive and input names; they override
+the selected section. `--` ends option parsing, so following names beginning
+with `-` are treated as input names. `-r` may also be placed in an INI
+section.
 
-`zlib_after` replaces those compressors with streaming zlib when a file is at
-least the specified size. The value can be bytes, `KiB`, `MiB` or `GiB`, such
-as `16MiB`; `off` disables the switch and `0` uses zlib for every file.
-`zlib_level` selects zlib compression from 1 to 9. A section with only these
-two settings is valid when `zlib_after = 0`. The built-in thresholds are 64 MiB
-for levels 1-6 and `off` for levels 7-9. libdeflate and ECT read a whole file
-into memory, so disabling the zlib switch for large files can require a lot of
-RAM. `zopfli_multithreading` and `zopfli_isPNG` must stay zero in this build.
-The optional `katzip.2.ini` profile switches levels 7, 8 and 9 to zlib at
-16 MiB, 4 MiB and 2 MiB respectively. Select it with
-`KATZIP_INI=/path/to/katzip.2.ini`.
+`--libdeflate_level` enables libdeflate. Any `--zopfli_*` option enables
+ECT's Zopfli variant, and any `--turtledeflate_*` option enables
+Turtledeflate. Unspecified settings for an enabled compressor come from the
+compiled defaults. When more than one compressor is enabled, katzip runs
+them on the same file and writes the shortest Deflate stream. Options may
+repeat; the last value in each source wins, and command-line values take
+priority. Unknown options and invalid values in the selected section are
+errors. Turtledeflate's `i_compression_level` is independent of the section
+number.
+
+`--zlib_after` replaces the competing compressors with streaming zlib when
+a file is at least the specified size. The value can be bytes, `KiB`, `MiB`
+or `GiB`, such as `16MiB`; `off` disables the switch and `0` uses zlib for
+every file. `--zlib_level` selects zlib compression from 1 to 9. It can be
+omitted when zlib is disabled; the compiled level remains available if the
+threshold is later changed. The built-in thresholds are 64 MiB for levels
+1-6 and `off` for levels 7-9. libdeflate and ECT read a whole file into
+memory, so disabling the zlib switch for large files can require a lot of
+RAM. `--zopfli_multithreading` and `--zopfli_isPNG` must stay zero in this
+build.
 
 You can edit the INI; katzip will not overwrite an existing one. Older INI
-formats must be replaced or converted to numbered sections. If katzip cannot
-create a new INI, it warns and uses its compiled settings. `KATZIP_INI`
-selects an explicit file and requires that file to exist. A missing or invalid
-selected section is an error. To regenerate defaults, rename the existing
-`katzip.ini` beside the executable; katzip creates a new one on the next
-archive run. Unsafe settings are rejected before an archive is created.
+formats must be replaced with the option syntax shown above. If katzip
+cannot create a new INI, it warns and uses its compiled settings.
+`KATZIP_INI` selects an explicit file and requires that file to exist. A
+missing or invalid selected section is an error. To regenerate defaults,
+rename the existing `katzip.ini` beside the executable; katzip creates a
+new one on the next archive run. Invalid settings are rejected before an
+archive is created. See [compression setting details](docs/deflate_settings.md).
 
 If the output name has no extension, katzip adds `.zip`. A name with an
 extension is used as given. Each later non-option argument is a file to add.
@@ -107,18 +126,16 @@ The `@` prefix normally lets a shell pass a mask without quotes. The default
 file argument adds only that file; with `-r` and masks, explicit files are also
 filtered by those masks. Symbolic links found during traversal are skipped.
 
-While compressing, katzip shows each file name and one increasing progress
-percentage with two decimal places on standard error. It refreshes once per
-second and stays below 100%. When a file is complete, the final line shows
-`100 * compressed_size / original_size` instead. The percentage is 0.00% for
-an empty input because the ratio is undefined. Stored files show 100.00%.
-With zlib, progress follows completed input chunks. libdeflate and ECT work
-on a complete file and do not report intermediate progress. Turtledeflate
-may revisit the same input block many times. Its percentage within a block is
-an estimate based on work already done; it reaches the exact block boundary
-when that block finishes. During a comparison, the display follows
-Turtledeflate when enabled and shows the final ratio after every compressor
-finishes.
+While compressing, katzip shows the current file name, archive-wide
+percentage with two decimal places. The percentage refreshes every second and stays
+below 100% until every file is written. After a file completes, its active
+line becomes a stable line with its compression ratio:
+`100 * compressed_size / original_size`. Names are padded so percentages
+align, including for UTF-8 Cyrillic names. An empty file has a 0.00% ratio;
+a stored file has a 100.00% ratio. In parallel mode, each completed compressor
+contributes an equal share of its file's original size. libdeflate and ECT
+do not report work inside a compression pass, so updates between completed
+tasks are estimates.
 
 katzip writes to a temporary file and replaces an existing output only after
 the new archive is complete. Ctrl+C (SIGINT) or SIGTERM removes the temporary
@@ -142,10 +159,11 @@ each archive before an existing output is replaced.
 
 ## Reading the source
 
-The program follows a short pipeline in `main`: parse options, load one
-compression section, then run the archive operation. `collect_entries` builds
-the input list. `write_archive_entries` applies the size switch and selects
-one compressor or the comparison path.
+The program follows a short pipeline in `main`: find the requested level,
+load its INI section, apply command-line options, then run the archive. `collect_entries` builds
+the input list. `write_archive_entries` sends multi-file work to the bounded scheduler in
+`parallel.c`. `parallel_tasks.c` prepares independent compressor jobs and
+selects the smallest result for each ZIP entry.
 `validate_archive` checks the exact ZIP size and reopens the temporary file.
 `publish_archive` changes its permissions, flushes it, then replaces the output.
 

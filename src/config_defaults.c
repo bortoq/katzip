@@ -1,93 +1,8 @@
 #include "katzip_internal.h"
 
-#define DEFAULT_ZLIB_AFTER (64U * 1024U * 1024U)
+#include "defaults.h"
 
-/* Presets are the only source for both compression and generated INI files. */
-static const int fast_defaults[] = {1, 2, 3, 5, 6, 8};
-
-/* ECT modes 7 and 9, expanded from ZopfliInitOptions(mode, 0, 0). */
-static const ZopfliOptions ect_defaults[] = {
-  {
-    .numiterations = 13,
-    .filter_style = 1,
-    .skipdynamic = 80,
-    .trystatic = 1800,
-    .noblocksplit = 1000,
-    .noblocksplitlz = 200,
-    .num = 9,
-    .searchext = 1,
-    .reuse_costmodel = 1,
-    .useCache = 1,
-    .multithreading = 0,
-    .isPNG = 0,
-    .replaceCodes = 1001,
-    .twice = 0,
-    .ultra = 1,
-    .greed = 258,
-    .entropysplit = 0,
-    .advanced = 1
-  },
-  {
-    .numiterations = 60,
-    .filter_style = 3,
-    .skipdynamic = 80,
-    .trystatic = 3000,
-    .noblocksplit = 800,
-    .noblocksplitlz = 100,
-    .num = 9,
-    .searchext = 2,
-    .reuse_costmodel = 1,
-    .useCache = 1,
-    .multithreading = 0,
-    .isPNG = 0,
-    .replaceCodes = 1001,
-    .twice = 0,
-    .ultra = 1,
-    .greed = 258,
-    .entropysplit = 0,
-    .advanced = 1
-  },
-  {
-    .numiterations = 60,
-    .filter_style = 3,
-    .skipdynamic = 80,
-    .trystatic = 3000,
-    .noblocksplit = 800,
-    .noblocksplitlz = 100,
-    .num = 9,
-    .searchext = 2,
-    .reuse_costmodel = 1,
-    .useCache = 1,
-    .multithreading = 0,
-    .isPNG = 0,
-    .replaceCodes = 1001,
-    .twice = 0,
-    .ultra = 1,
-    .greed = 258,
-    .entropysplit = 0,
-    .advanced = 1
-  }
-};
-
-static const turtledeflate_config_t turtle_defaults[] = {
-  {
-    .i_compression_level = 9,
-    .i_maximum_block_size = 1000000,
-    .i_maximum_subblocks = 512,
-    .i_max_block_splitter_iterations = 30,
-    .i_max_internal_block_splitter_iterations = 100,
-    .i_block_splitter_num_points = 31,
-    .i_block_splitter_center_dist = 8,
-    .i_block_splitter_min_range_for_points = 1024,
-    .b_block_splitter_push_split = true,
-    .i_min_start_fp = -6,
-    .i_max_start_fp = 5,
-    .i_num_start_fp = 16,
-    .i_verbose = 0
-  }
-};
-
-/* The table also assigns one bit to each required Turtledeflate setting. */
+/* Names and offsets shared by the INI parser, CLI parser, and generator. */
 const CONFIG_FIELD config_fields[13] = {
   {"i_compression_level", offsetof(turtledeflate_config_t, i_compression_level), 0},
   {"i_maximum_block_size", offsetof(turtledeflate_config_t, i_maximum_block_size), 0},
@@ -131,27 +46,25 @@ const ECT_FIELD ect_fields[18] = {
 };
 void use_default_config(int level, COMPRESSION_CONFIG *config)
 {
+  int fast_index = level <= FAST_LEVEL_COUNT ?
+    level - 1 : FAST_LEVEL_COUNT - 1;
+  int ect_index = level <= ECT_FIRST_LEVEL ?
+    0 : level - ECT_FIRST_LEVEL;
   memset(config, 0, sizeof(*config));
-  config->zlib_level = level;
+  config->fast_level = fast_defaults[fast_index];
+  config->ect = ect_defaults[ect_index];
+  config->turtle = turtle_defaults[0];
   config->zlib_after = UINT64_MAX;
-  if(level <= (int)ARRAY_N(fast_defaults))
+  config->zlib_level = level;
+  if(level <= FAST_LEVEL_COUNT)
   {
     config->have_fast = 1;
-    config->fast_level = fast_defaults[level - 1];
-    config->zlib_level = fast_defaults[level - 1] > 9 ?
-      9 : fast_defaults[level - 1];
+    config->zlib_level = config->fast_level;
     config->zlib_after = DEFAULT_ZLIB_AFTER;
+    return;
   }
-  else
-  {
-    config->have_ect = 1;
-    config->ect = ect_defaults[level - 7];
-  }
-  if(level == 9)
-  {
-    config->have_turtle = 1;
-    config->turtle = turtle_defaults[0];
-  }
+  config->have_ect = 1;
+  config->have_turtle = level == HIGHEST_LEVEL;
 }
 
 static int default_field_value(const turtledeflate_config_t *config,
@@ -176,7 +89,7 @@ static int write_ect_settings(FILE *file, const ZopfliOptions *options)
 {
   size_t field;
   for(field = 0; field < ARRAY_N(ect_fields); ++field)
-    if(fprintf(file, "zopfli_%s = %d\n", ect_fields[field].name,
+    if(fprintf(file, "--zopfli_%s %d\n", ect_fields[field].name,
       default_ect_value(options, &ect_fields[field])) < 0)
       return -1;
   return 0;
@@ -187,7 +100,7 @@ static int write_turtle_settings(FILE *file,
 {
   size_t field;
   for(field = 0; field < ARRAY_N(config_fields); ++field)
-    if(fprintf(file, "turtledeflate_%s = %d\n",
+    if(fprintf(file, "--turtledeflate_%s %d\n",
       config_fields[field].name,
       default_field_value(config, &config_fields[field])) < 0)
       return -1;
@@ -197,8 +110,8 @@ static int write_turtle_settings(FILE *file,
 static int write_zlib_threshold(FILE *file, const COMPRESSION_CONFIG *config)
 {
   if(config->zlib_after == UINT64_MAX)
-    return fputs("zlib_after = off\n", file) == EOF ? -1 : 0;
-  return fprintf(file, "zlib_after = %llu\n",
+    return fputs("--zlib_after off\n", file) == EOF ? -1 : 0;
+  return fprintf(file, "--zlib_after %llu\n",
     (unsigned long long)config->zlib_after) < 0 ? -1 : 0;
 }
 
@@ -207,7 +120,7 @@ static int write_default_fast(FILE *file,
 {
   if(!config->have_fast)
     return 0;
-  return fprintf(file, "libdeflate_level = %d\n",
+  return fprintf(file, "--libdeflate_level %d\n",
     config->fast_level) < 0 ? -1 : 0;
 }
 
@@ -247,7 +160,7 @@ static int write_default_section(FILE *file, int level)
     return -1;
   if(write_zlib_threshold(file, &config))
     return -1;
-  return fprintf(file, "zlib_level = %d\n", config.zlib_level) < 0 ? -1 : 0;
+  return fprintf(file, "--zlib_level %d\n", config.zlib_level) < 0 ? -1 : 0;
 }
 
 static int write_section_separator(FILE *file, int level)
@@ -273,11 +186,6 @@ static int write_default_sections(FILE *file)
 /* Generate the editable file from the same tables as the fallback. */
 int write_default_ini(FILE *file)
 {
-  if(fputs("# One section per katzip level. Multiple compressor setting groups "
-    "compete.\n# zlib_after replaces them at or above the given file size; "
-    "off disables it.\n# Sizes accept bytes, KiB, MiB and GiB.\n\n",
-    file) == EOF)
-    return -1;
   if(write_default_sections(file))
     return -1;
   return ferror(file) ? -1 : 0;

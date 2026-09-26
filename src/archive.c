@@ -1,9 +1,17 @@
 #include "katzip_internal.h"
 
 static const char *volatile signal_temp_path;
+static const char *volatile signal_snapshot_path;
+
+void set_signal_snapshot_path(const char *path)
+{
+  signal_snapshot_path = path;
+}
 
 static void remove_temp_on_signal(int signal_number)
 {
+  if(signal_snapshot_path)
+    unlink(signal_snapshot_path);
   if(signal_temp_path)
     unlink(signal_temp_path);
   _exit(128 + signal_number);
@@ -186,9 +194,18 @@ static int write_archive_entries(ARCHIVE_OUTPUT *output,
     mz_zip_writer_get_zip_handle(output->writer,
       &output->zip) != MZ_OK)
     return -1;
-  for(i = 0; i < list->count; ++i)
-    if(write_archive_entry(output, &list->entries[i], options, config))
+  if(list->count > 1)
+  {
+    if(write_parallel_entries(output->zip, list, config,
+      zip_level_hint(options->level), &output->progress))
       return -1;
+  }
+  else
+  {
+    for(i = 0; i < list->count; ++i)
+      if(write_archive_entry(output, &list->entries[i], options, config))
+        return -1;
+  }
   if(mz_zip_writer_close(output->writer) != MZ_OK)
     return -1;
   mz_zip_writer_delete(&output->writer);
@@ -292,6 +309,7 @@ static int process_archive(ARCHIVE_OUTPUT *output, ENTRY_LIST *list,
     return -1;
   if(initialize_archive_output(output, archive_path))
     return -1;
+  progress_set_total(&output->progress, list, list->count > 1);
   if(finish_archive(output, list, options, config,
     archive_path, mode))
     return 1;

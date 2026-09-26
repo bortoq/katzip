@@ -36,7 +36,7 @@ static int valid_turtle_precision(const turtledeflate_config_t *config)
     config->i_num_start_fp <= TURTLEDEFLATE_MAX_NUM_FP_START / 2;
 }
 
-static int valid_config(const turtledeflate_config_t *config)
+static int valid_turtle(const turtledeflate_config_t *config)
 {
   return valid_turtle_basic(config) &&
     valid_turtle_iterations(config) &&
@@ -45,14 +45,6 @@ static int valid_config(const turtledeflate_config_t *config)
     config->i_verbose >= TURTLEDEFLATE_VERBOSE_NONE &&
     config->i_verbose <= TURTLEDEFLATE_VERBOSE_SQUISHITER;
 }
-
-typedef struct {
-  uint32_t fast;
-  uint32_t ect;
-  uint32_t turtle;
-  int zlib_after;
-  int zlib_level;
-} CONFIG_SEEN;
 
 static int size_multiplier(const char *suffix, uint64_t *multiplier)
 {
@@ -110,273 +102,213 @@ static int parse_number(const char *text, int *number)
   return 0;
 }
 
-static size_t ect_field_index(const char *name)
+static const ECT_FIELD *find_ect_field(const char *name)
 {
   size_t i;
   for(i = 0; i < ARRAY_N(ect_fields); ++i)
     if(strcmp(name, ect_fields[i].name) == 0)
-      return i;
-  return ARRAY_N(ect_fields);
+      return &ect_fields[i];
+  return NULL;
 }
 
-static int valid_ect_field(size_t index, int number,
-  const CONFIG_SEEN *seen)
-{
-  if(index == ARRAY_N(ect_fields))
-    return 0;
-  if(seen->ect & (UINT32_C(1) << index))
-    return 0;
-  return number >= ect_fields[index].minimum &&
-    number <= ect_fields[index].maximum;
-}
-
-static int parse_ect_setting(const char *name, int number,
-  COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
-{
-  size_t i = ect_field_index(name);
-  if(!valid_ect_field(i, number, seen))
-    return -1;
-  if(i == 0)
-    config->ect.numiterations = number;
-  else
-    *(unsigned*)((unsigned char*)&config->ect + ect_fields[i].offset) =
-      (unsigned)number;
-  seen->ect |= UINT32_C(1) << i;
-  return 0;
-}
-
-static size_t turtle_field_index(const char *name)
+static const CONFIG_FIELD *find_turtle_field(const char *name)
 {
   size_t i;
   for(i = 0; i < ARRAY_N(config_fields); ++i)
     if(strcmp(name, config_fields[i].name) == 0)
-      return i;
-  return ARRAY_N(config_fields);
+      return &config_fields[i];
+  return NULL;
 }
 
-static int store_turtle_field(turtledeflate_config_t *config,
-  const CONFIG_FIELD *field, int number)
+int config_option_known(const char *option)
 {
-  unsigned char *address = (unsigned char*)config + field->offset;
-  if(!field->boolean)
+  if(strcmp(option, "--zlib_after") == 0 ||
+    strcmp(option, "--zlib_level") == 0 ||
+    strcmp(option, "--libdeflate_level") == 0)
+    return 1;
+  if(strncmp(option, "--zopfli_", 9) == 0)
+    return find_ect_field(option + 9) != NULL;
+  if(strncmp(option, "--turtledeflate_", 16) == 0)
+    return find_turtle_field(option + 16) != NULL;
+  return 0;
+}
+
+static int set_ect(const ECT_FIELD *field, int number,
+  COMPRESSION_CONFIG *config)
+{
+  unsigned char *address;
+  if(!field || number < field->minimum || number > field->maximum)
+    return -1;
+  address = (unsigned char*)&config->ect + field->offset;
+  if(field == &ect_fields[0])
+    *(int*)address = number;
+  else
+    *(unsigned*)address = (unsigned)number;
+  config->have_ect = 1;
+  return 0;
+}
+
+static int set_turtle(const CONFIG_FIELD *field, int number,
+  COMPRESSION_CONFIG *config)
+{
+  unsigned char *address;
+  if(!field)
+    return -1;
+  address = (unsigned char*)&config->turtle + field->offset;
+  if(field->boolean)
   {
+    if(number != 0 && number != 1)
+      return -1;
+    *(bool*)address = number != 0;
+  }
+  else
     *(int32_t*)address = (int32_t)number;
+  config->have_turtle = 1;
+  return 0;
+}
+
+static int set_numeric(const char *option, int number,
+  COMPRESSION_CONFIG *config)
+{
+  if(strcmp(option, "--zlib_level") == 0)
+  {
+    if(number < 1 || number > 9)
+      return -1;
+    config->zlib_level = number;
     return 0;
   }
-  if(number != 0 && number != 1)
-    return -1;
-  *(bool*)address = number != 0;
-  return 0;
-}
-
-static int parse_turtle_setting(const char *name, int number,
-  COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
-{
-  size_t i = turtle_field_index(name);
-  if(i == ARRAY_N(config_fields))
-    return -1;
-  if(seen->turtle & (UINT32_C(1) << i))
-    return -1;
-  if(store_turtle_field(&config->turtle, &config_fields[i], number))
-    return -1;
-  seen->turtle |= UINT32_C(1) << i;
-  return 0;
-}
-
-static int parse_zlib_after(const char *value, COMPRESSION_CONFIG *config,
-  CONFIG_SEEN *seen)
-{
-  if(seen->zlib_after || parse_size(value, &config->zlib_after))
-    return -1;
-  seen->zlib_after = 1;
-  return 0;
-}
-
-static int parse_zlib_level(int number, COMPRESSION_CONFIG *config,
-  CONFIG_SEEN *seen)
-{
-  if(seen->zlib_level || number < 1 || number > 9)
-    return -1;
-  config->zlib_level = number;
-  seen->zlib_level = 1;
-  return 0;
-}
-
-static int parse_fast_level(int number, COMPRESSION_CONFIG *config,
-  CONFIG_SEEN *seen)
-{
-  if(seen->fast || number < 1 || number > 12)
-    return -1;
-  config->fast_level = number;
-  seen->fast = 1;
-  return 0;
-}
-
-static int parse_numeric_setting(const char *name, int number,
-  COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
-{
-  if(strcmp(name, "zlib_level") == 0)
-    return parse_zlib_level(number, config, seen);
-  if(strcmp(name, "libdeflate_level") == 0)
-    return parse_fast_level(number, config, seen);
-  if(strncmp(name, "zopfli_", 7) == 0)
-    return parse_ect_setting(name + 7, number, config, seen);
-  if(strncmp(name, "turtledeflate_", 14) == 0)
-    return parse_turtle_setting(name + 14, number, config, seen);
+  if(strcmp(option, "--libdeflate_level") == 0)
+  {
+    if(number < 1 || number > 12)
+      return -1;
+    config->fast_level = number;
+    config->have_fast = 1;
+    return 0;
+  }
+  if(strncmp(option, "--zopfli_", 9) == 0)
+    return set_ect(find_ect_field(option + 9), number, config);
+  if(strncmp(option, "--turtledeflate_", 16) == 0)
+    return set_turtle(find_turtle_field(option + 16), number, config);
   return -1;
 }
 
-static int parse_setting(char *line, COMPRESSION_CONFIG *config,
-  CONFIG_SEEN *seen)
-{
-  char *value = strchr(line, '=');
-  int number;
-  if(!value)
-    return -1;
-  *value++ = 0;
-  line = trim(line);
-  value = trim(value);
-  if(strcmp(line, "zlib_after") == 0)
-    return parse_zlib_after(value, config, seen);
-  if(parse_number(value, &number))
-    return -1;
-  return parse_numeric_setting(line, number, config, seen);
-}
-
-static int no_configured_engines(const CONFIG_SEEN *seen)
-{
-  return !seen->fast && !seen->ect && !seen->turtle;
-}
-
-static int ect_group_complete(const CONFIG_SEEN *seen)
-{
-  uint32_t all = (UINT32_C(1) << ARRAY_N(ect_fields)) - 1;
-  return !seen->ect || seen->ect == all;
-}
-
-static int turtle_group_complete(const CONFIG_SEEN *seen,
-  const COMPRESSION_CONFIG *config)
-{
-  uint32_t all = (UINT32_C(1) << ARRAY_N(config_fields)) - 1;
-  if(!seen->turtle)
-    return 1;
-  return seen->turtle == all && valid_config(&config->turtle);
-}
-
-static int config_engines_complete(const CONFIG_SEEN *seen,
-  const COMPRESSION_CONFIG *config)
-{
-  if(no_configured_engines(seen))
-    return config->zlib_after == 0;
-  if(!ect_group_complete(seen))
-    return 0;
-  return turtle_group_complete(seen, config);
-}
-
-static int config_is_complete(int found, const CONFIG_SEEN *seen,
+int apply_config_option(const char *option, const char *value,
   COMPRESSION_CONFIG *config)
 {
-  if(!found || !seen->zlib_after || !seen->zlib_level)
-    return 0;
-  if(!config_engines_complete(seen, config))
-    return 0;
-  config->have_fast = seen->fast != 0;
-  config->have_ect = seen->ect != 0;
-  config->have_turtle = seen->turtle != 0;
-  return 1;
+  int number;
+  if(strcmp(option, "--zlib_after") == 0)
+    return parse_size(value, &config->zlib_after);
+  if(!config_option_known(option) || parse_number(value, &number))
+    return -1;
+  return set_numeric(option, number, config);
 }
 
-static int read_section_header(const char *text, const char *section,
-  int *active, int *found)
+int validate_compression_config(const COMPRESSION_CONFIG *config)
 {
-  *active = strcmp(text, section) == 0;
-  if(!*active)
-    return 0;
-  if(*found)
+  if(config->zlib_after != 0 && !config->have_fast &&
+    !config->have_ect && !config->have_turtle)
     return -1;
-  *found = 1;
+  if(config->have_turtle && !valid_turtle(&config->turtle))
+    return -1;
   return 0;
 }
 
-static int read_config_line(char *line, const char *section,
-  int *active, int *found, COMPRESSION_CONFIG *config, CONFIG_SEEN *seen)
+static int parse_ini_option(char *text, COMPRESSION_CONFIG *config,
+  OPTIONS *options)
 {
-  char *text = trim(line);
-  if(!*text || *text == '#' || *text == ';')
+  char *value = text;
+  while(*value && !isspace((unsigned char)*value))
+    ++value;
+  if(*value)
+    *value++ = 0;
+  value = trim(value);
+  if(strcmp(text, "-r") == 0 && !*value)
+  {
+    options->recursive = 1;
     return 0;
-  if(*text == '[')
-    return read_section_header(text, section, active, found);
-  if(!*active)
-    return 0;
-  return parse_setting(text, config, seen);
+  }
+  if(!*value || !config_option_known(text))
+    return -1;
+  if(strpbrk(value, " \t\r\n"))
+    return -1;
+  return apply_config_option(text, value, config);
+}
+
+static int section_header(const char *text, int level)
+{
+  return text[0] == '[' && text[1] == (char)('0' + level) &&
+    text[2] == ']' && text[3] == 0;
 }
 
 static int read_selected_section(FILE *file, const char *path,
-  const char *section, COMPRESSION_CONFIG *config,
-  CONFIG_SEEN *seen, int *found)
+  int level, COMPRESSION_CONFIG *config, OPTIONS *options)
 {
-  char line[256];
+  char *line = NULL;
+  size_t capacity = 0;
   int active = 0;
-  int line_number = 0;
-  while(fgets(line, sizeof(line), file))
-  {
-    ++line_number;
-    if((!strchr(line, '\n') && !feof(file)) ||
-      read_config_line(line, section, &active, found, config, seen))
-    {
-      fprintf(stderr, "katzip: invalid setting in %s:%d\n",
-        path, line_number);
-      return -1;
-    }
-  }
-  return 0;
-}
-
-static int read_config(FILE *file, const char *path, int level,
-  COMPRESSION_CONFIG *config)
-{
-  char section[16];
-  CONFIG_SEEN seen = {0};
   int found = 0;
-  snprintf(section, sizeof(section), "[%d]", level);
-  memset(config, 0, sizeof(*config));
-  if(read_selected_section(file, path, section, config, &seen, &found))
-    return -1;
+  int line_number = 0;
+  int invalid = 0;
+  while(getline(&line, &capacity, file) >= 0)
+  {
+    char *text = trim(line);
+    ++line_number;
+    if(*text == '[')
+    {
+      active = section_header(text, level);
+      if(active && found)
+      {
+        invalid = 1;
+        break;
+      }
+      found |= active;
+      continue;
+    }
+    if(!active || !*text || *text == '#' || *text == ';')
+      continue;
+    if(parse_ini_option(text, config, options) == 0)
+      continue;
+    invalid = 1;
+    break;
+  }
+  free(line);
   if(ferror(file))
   {
     fprintf(stderr, "katzip: cannot read %s\n", path);
     return -1;
   }
-  if(!config_is_complete(found, &seen, config))
+  if(invalid)
   {
-    fprintf(stderr, "katzip: missing or invalid settings in %s %s\n",
-      path, section);
+    fprintf(stderr, "katzip: invalid setting in %s:%d\n",
+      path, line_number);
+    return -1;
+  }
+  if(!found)
+  {
+    fprintf(stderr, "katzip: missing section [%d] in %s\n", level, path);
     return -1;
   }
   return 0;
 }
 
 int load_config(const char *program, int level,
-  COMPRESSION_CONFIG *config)
+  COMPRESSION_CONFIG *config, OPTIONS *options)
 {
   char *path = NULL;
   FILE *file;
   int result;
+  use_default_config(level, config);
   result = open_config(program, &file, &path);
   if(result != 0)
   {
     free(path);
-    if(result > 0)
-    {
-      use_default_config(level, config);
-      return 0;
-    }
-    return -1;
+    return result < 0 ? -1 : 0;
   }
-  result = read_config(file, path, level, config);
+  config->have_fast = 0;
+  config->have_ect = 0;
+  config->have_turtle = 0;
+  result = read_selected_section(file, path, level, config, options);
   fclose(file);
   free(path);
   return result;
 }
-
-/* raw DEFLATE is already compressed; this level only sets the ZIP hint bits. */

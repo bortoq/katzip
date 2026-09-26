@@ -123,3 +123,40 @@ int write_ect_entry(void *zip, ENTRY *entry, FILE *in,
   progress_finish(progress, result == 0);
   return result;
 }
+
+/* Run ECT in the caller's worker; no nested thread is created. */
+int make_ect_candidate(CANDIDATE *candidate, FILE *in,
+  uint32_t size, const ZopfliOptions *options)
+{
+  ECT_JOB job = {0};
+  if(!size)
+  {
+    candidate->data = malloc(2);
+    if(!candidate->data)
+      return -1;
+    candidate->data[0] = 0x03;
+    candidate->data[1] = 0x00;
+    candidate->size = 2;
+    return 0;
+  }
+  if((uint64_t)size + 16 > SIZE_MAX)
+    return -1;
+  job.input = malloc((size_t)size + 16);
+  if(!job.input)
+    return -1;
+  if(read_ect_input(in, &job, size))
+  {
+    free(job.input);
+    return -1;
+  }
+  memset(job.input + size, 0, 16);
+  job.input_size = size;
+  job.options = *options;
+  job.crc = update_crc(UINT32_MAX, job.input, size) ^ UINT32_MAX;
+  ect_worker(&job);
+  candidate->data = job.output;
+  candidate->size = job.output && job.output_size ?
+    job.output_size : UINT64_MAX;
+  candidate->crc = job.crc;
+  return 0;
+}

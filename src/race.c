@@ -1,13 +1,6 @@
 #include "katzip_internal.h"
 
-typedef struct {
-  unsigned char *data;
-  FILE *file;
-  uint64_t size;
-  uint32_t crc;
-} CANDIDATE;
-
-static void finish_candidate(CANDIDATE *candidate)
+void finish_candidate(CANDIDATE *candidate)
 {
   free(candidate->data);
   if(candidate->file)
@@ -45,7 +38,7 @@ static void compress_fast_candidate(CANDIDATE *candidate,
 }
 
 /* libdeflate needs a complete input buffer. Retain only its DEFLATE result. */
-static int make_fast_candidate(CANDIDATE *candidate, FILE *in,
+int make_fast_candidate(CANDIDATE *candidate, FILE *in,
   uint32_t size, int level)
 {
   struct libdeflate_compressor *compressor;
@@ -69,7 +62,7 @@ static int make_fast_candidate(CANDIDATE *candidate, FILE *in,
 }
 
 /* Turtledeflate streams to a temporary file so its result need not fit RAM. */
-static int make_turtle_candidate(CANDIDATE *candidate, FILE *in,
+int make_turtle_candidate(CANDIDATE *candidate, FILE *in,
   const ENTRY *entry, const turtledeflate_config_t *config,
   PROGRESS *progress)
 {
@@ -262,6 +255,24 @@ static int write_best_candidate(void *zip, ENTRY *entry, FILE *in,
     return -1;
   return write_selected_candidate(zip, entry, in, candidates, best,
     crc, zip_level);
+}
+
+/* Package a prepared raw stream without changing ZIP metadata. */
+int write_prepared_entry(void *zip, ENTRY *entry, FILE *in,
+  CANDIDATE *candidate, int store, int zip_level)
+{
+  int method = store ? MZ_COMPRESS_METHOD_STORE :
+    MZ_COMPRESS_METHOD_DEFLATE;
+  entry->size = entry->expected_size;
+  entry->compressed_size = store ? entry->size : candidate->size;
+  if(entry->compressed_size > UINT32_MAX)
+    return -1;
+  if(open_zip_entry(zip, entry, method, zip_level))
+    return -1;
+  if(store ? write_stored_input(zip, in, entry->size,
+    candidate->crc) : copy_candidate(zip, candidate))
+    return -1;
+  return close_zip_entry(zip, entry, candidate->crc ^ UINT32_MAX);
 }
 
 static int start_race_ect(ECT_JOB *job, FILE *in,

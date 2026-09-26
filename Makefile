@@ -30,11 +30,11 @@ katzip: $(KATZIP_SOURCES) $(KATZIP_HEADERS) $(TURTLE_SRC) $(TURTLE_HEADERS) $(MI
 	  -DMZ_BUILD_UNIT_TESTS=OFF -DMZ_COMPAT=OFF >/dev/null; \
 	$(CMAKE) --build "$$build_dir/minizip" --parallel 2 >/dev/null; \
 	for source in blocksplitter lz77 squeeze util; do \
-	  $(CC) $(ECT_CFLAGS) -DNOMULTI -c "third_party/ect/src/zopfli/$$source.c" -o "$$build_dir/ect_$$source.o"; \
+	  $(CC) $(ECT_CFLAGS) -c "third_party/ect/src/zopfli/$$source.c" -o "$$build_dir/ect_$$source.o"; \
 	done; \
-	$(CC) $(ECT_CFLAGS) -DNOMULTI -c third_party/ect/src/LzFind.c -o "$$build_dir/ect_LzFind.o"; \
+	$(CC) $(ECT_CFLAGS) -c third_party/ect/src/LzFind.c -o "$$build_dir/ect_LzFind.o"; \
 	for source in deflate katajainen; do \
-	  $(CXX) $(CXXFLAGS) -DNOMULTI -c "third_party/ect/src/zopfli/$$source.cpp" -o "$$build_dir/ect_$$source.o"; \
+	  $(CXX) $(CXXFLAGS) -c "third_party/ect/src/zopfli/$$source.cpp" -o "$$build_dir/ect_$$source.o"; \
 	done; \
 	for source in turtledeflate turtledeflate_tree turtledeflate_block turtledeflate_bitstream; do \
 	  $(CC) $(CFLAGS) -I"$$build_dir/inc" -I"$$build_dir/lib" \

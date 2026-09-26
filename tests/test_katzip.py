@@ -1,5 +1,6 @@
 import os
 import pathlib
+import re
 import resource
 import shutil
 import signal
@@ -80,6 +81,7 @@ class KatzipTests(unittest.TestCase):
             "  -1 ... -9   Compression level (default: -7).\n"
             "  -r          Search directories recursively.\n"
             "  -h, --help  Show this help.\n"
+            "  --full-help Show compression settings and this help.\n"
             "  --          Treat all following arguments as input names.\n"
             "\n"
             "Input:\n"
@@ -166,7 +168,7 @@ class KatzipTests(unittest.TestCase):
         with zipfile.ZipFile(self.root / "deep.zip") as opened:
             self.assertEqual(set(opened.namelist()), {"top.txt", "nested/deep.txt"})
 
-    def test_final_percentage_is_compressed_size_ratio(self):
+    def test_final_line_shows_file_compression_ratio(self):
         data = b"compressible text " * 1000
         (self.root / "text.txt").write_bytes(data)
         result = self.run_katzip("-1", "archive", "text.txt")
@@ -175,8 +177,46 @@ class KatzipTests(unittest.TestCase):
             info = opened.getinfo("text.txt")
             ratio = 100 * info.compress_size / info.file_size
         lines = result.stderr.decode().replace("\r", "\n").splitlines()
-        self.assertEqual(lines[-1], f"text.txt {ratio:.2f}%")
-        self.assertNotIn("100.00%", result.stderr.decode())
+        self.assertEqual(lines[-1].rstrip(),
+                         f"text.txt  {ratio:.2f}%")
+        self.assertRegex(result.stderr.decode(),
+                         r"text\.txt  \d+\.\d{2}%")
+
+    def test_parallel_progress_is_archive_wide_and_monotonic(self):
+        files = {
+            "first.txt": b"first file " * 1000,
+            "second.txt": b"second file " * 2000,
+            "third.txt": b"third file " * 3000,
+        }
+        for name, content in files.items():
+            (self.root / name).write_bytes(content)
+        result = self.run_katzip("-1", "archive", *files)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        values = [float(value) for value in re.findall(
+            r"\r[^\r\n]*?  (\d+\.\d{2})%(?=\r)",
+            result.stderr.decode())]
+        self.assertTrue(values)
+        self.assertEqual(values, sorted(values))
+        self.assertLess(values[-1], 100.0)
+        completed = [line.rstrip() for line in re.findall(
+            r"\r([^\r\n]+)\n", result.stderr.decode())]
+        self.assertEqual(len(completed), len(files))
+        self.assertTrue(completed[-1].startswith("third.txt  "))
+
+    def test_completed_lines_align_utf8_names(self):
+        names = ["Neonomicon 001-000 копия.jpg", "Neonomicon 001-002.jpg"]
+        for name in names:
+            (self.root / name).write_bytes(b"image data " * 100)
+        result = self.run_katzip("-1", "archive", *names)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        completed = [line.rstrip() for line in re.findall(
+            r"\r([^\r\n]+)\n", result.stderr.decode())]
+        self.assertEqual(len(completed), 2)
+        columns = [line.index(re.search(r"\d+\.\d{2}%$", line).group())
+                   for line in completed]
+        self.assertEqual(columns[0], columns[1])
+        self.assertNotIn("overall", result.stderr.decode())
+        self.assertNotIn("▁", result.stderr.decode())
 
     def test_existing_archive_survives_write_error(self):
         old = self.root / "archive.zip"
@@ -256,7 +296,8 @@ class KatzipTests(unittest.TestCase):
             self.assertIsNone(opened.testzip())
             ratio = 100 * opened.getinfo("pattern.bin").compress_size / len(content)
         lines = result.stderr.decode().replace("\r", "\n").splitlines()
-        self.assertEqual(lines[-1].rstrip(), f"pattern.bin {ratio:.2f}%")
+        self.assertEqual(lines[-1].rstrip(),
+                         f"pattern.bin  {ratio:.2f}%")
 
     def test_zip_level_hint_bits(self):
         data = b"ZIP level hints and compression. " * 40
@@ -292,6 +333,67 @@ class KatzipTests(unittest.TestCase):
                 self.assertEqual(opened.getinfo("text.txt").compress_type, zipfile.ZIP_DEFLATED)
                 self.assertEqual(opened.read("random.bin"), (self.root / "random.bin").read_bytes())
                 self.assertEqual(opened.getinfo("random.bin").compress_type, zipfile.ZIP_STORED)
+
+    def test_parallel_turtle_race_writes_valid_zip(self):
+        inputs = {f"part{index}.txt":
+                  (f"file {index}: abcdefghijklmnop\n".encode() * 100)
+                  for index in range(3)}
+        for name, content in inputs.items():
+            (self.root / name).write_bytes(content)
+        result = self.run_katzip("-9", "archive", *inputs, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            self.assertEqual(opened.namelist(), list(inputs))
+            for name, content in inputs.items():
+                self.assertEqual(opened.read(name), content)
+            self.assertIsNone(opened.testzip())
+            overhead = 22 + sum(76 + 2 * len(name.encode())
+                                for name in inputs)
+            compressed = sum(item.compress_size for item in opened.infolist())
+            self.assertEqual((self.root / "archive.zip").stat().st_size,
+                             overhead + compressed)
+
+    def test_parallel_ect_files_keep_independent_state(self):
+        inputs = {}
+        for index in range(4):
+            content = (bytes(range(256)) * 16 +
+                       f"file {index} pattern".encode() * 400) * 12
+            name = f"part{index}.bin"
+            (self.root / name).write_bytes(content)
+            inputs[name] = content
+        result = self.run_katzip("-7", "archive", *inputs, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            for name, content in inputs.items():
+                self.assertEqual(opened.read(name), content)
+            self.assertIsNone(opened.testzip())
+
+    def test_parallel_competition_and_zlib_threshold(self):
+        defaults = self.default_ini()
+        section = defaults.split("[7]", 1)[1].split("[8]", 1)[0]
+        zopfli = [line for line in section.splitlines()
+                  if line.startswith("--zopfli_")]
+        settings = self.root / "parallel.ini"
+        settings.write_text("[1]\n--libdeflate_level 1\n" +
+                            "\n".join(zopfli) +
+                            "\n--zlib_after 2KiB\n--zlib_level 1\n")
+        inputs = {
+            "first.txt": b"first repeated text\n" * 40,
+            "random.bin": os.urandom(1024),
+            "large.txt": b"large repeated text\n" * 1000,
+        }
+        for name, content in inputs.items():
+            (self.root / name).write_bytes(content)
+        environment = dict(os.environ, KATZIP_INI=str(settings),
+                           TMPDIR=str(self.root))
+        result = self.run_katzip("-1", "parallel", *inputs, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "parallel.zip") as opened:
+            self.assertEqual(opened.namelist(), list(inputs))
+            for name, content in inputs.items():
+                self.assertEqual(opened.read(name), content)
+            self.assertIsNone(opened.testzip())
+        self.assertEqual(list(self.root.glob("katzip-input-*")), [])
 
     def test_ect_levels_handle_empty_and_incompressible_files(self):
         (self.root / "empty.bin").write_bytes(b"")
@@ -333,18 +435,18 @@ class KatzipTests(unittest.TestCase):
         environment = dict(os.environ, KATZIP_INI=str(config))
         defaults = self.default_ini()
         for key, replacement in (
-            ("turtledeflate_i_maximum_block_size = 1000000",
-             "turtledeflate_i_maximum_block_size = 1000001"),
-            ("turtledeflate_i_min_start_fp = -6",
-             "turtledeflate_i_min_start_fp = -2147483648"),
+            ("--turtledeflate_i_maximum_block_size 1000000",
+             "--turtledeflate_i_maximum_block_size 1000001"),
+            ("--turtledeflate_i_min_start_fp -6",
+             "--turtledeflate_i_min_start_fp -2147483648"),
         ):
             config.write_text(defaults.replace(key, replacement))
             result = self.run_katzip("-9", "archive", "input.txt", env=environment)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(b"invalid settings", result.stderr)
+            self.assertIn(b"invalid compressor configuration", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
 
-    def test_ect_settings_are_required_and_checked(self):
+    def test_ect_settings_are_checked(self):
         (self.root / "input.txt").write_text("A repeated sentence. " * 100)
         config = self.root / "custom.ini"
         environment = dict(os.environ, KATZIP_INI=str(config))
@@ -353,7 +455,7 @@ class KatzipTests(unittest.TestCase):
             section = f"[{level}]\n"
             head, rest = defaults.split(section, 1)
             body, tail = rest.split("\n\n", 1) if level < 9 else (rest, "")
-            body = body.replace("zopfli_numiterations = ",
+            body = body.replace("--zopfli_numiterations ",
                                 "removed_numiterations = ", 1)
             config.write_text(head + section + body +
                               ("\n\n" + tail if tail else ""))
@@ -362,15 +464,15 @@ class KatzipTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid setting", result.stderr)
-        for replacement in ("zopfli_numiterations = 0", "zopfli_numiterations = 1001"):
-            config.write_text(defaults.replace("zopfli_numiterations = 13", replacement, 1))
+        for replacement in ("--zopfli_numiterations 0", "--zopfli_numiterations 1001"):
+            config.write_text(defaults.replace("--zopfli_numiterations 13", replacement, 1))
             result = self.run_katzip(
                 "-7", "archive", "input.txt", env=environment
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid setting", result.stderr)
-        config.write_text(defaults.replace("zopfli_numiterations = 13",
-                                           "zopfli_numiterations = 1", 1))
+        config.write_text(defaults.replace("--zopfli_numiterations 13",
+                                           "--zopfli_numiterations 1", 1))
         result = self.run_katzip("-7", "archive", "input.txt", env=environment)
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(self.root / "archive.zip") as archive:
@@ -387,7 +489,7 @@ class KatzipTests(unittest.TestCase):
         end = defaults.index("[8]\n", start)
         base = defaults[start:end]
         for threshold in ("off", "1KiB", "8192B", "0"):
-            section = base.replace("zlib_after = off", f"zlib_after = {threshold}")
+            section = base.replace("--zlib_after off", f"--zlib_after {threshold}")
             config.write_text(defaults[:start] + section + defaults[end:])
             result = self.run_katzip("-7", "archive", "input.txt", env=environment)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -400,7 +502,7 @@ class KatzipTests(unittest.TestCase):
                     else:
                         self.assertEqual(selected, switched_size)
         config.write_text(defaults[:start] +
-                          base.replace("zlib_after = off", "zlib_after = 1*1024") +
+                          base.replace("--zlib_after off", "--zlib_after 1*1024") +
                           defaults[end:])
         result = self.run_katzip("-7", "archive", "input.txt", env=environment)
         self.assertNotEqual(result.returncode, 0)
@@ -416,7 +518,7 @@ class KatzipTests(unittest.TestCase):
         end = defaults.index("[8]\n", start)
         section = defaults[start:end]
         candidates = []
-        for extra in ("", "libdeflate_level = 1\n"):
+        for extra in ("", "--libdeflate_level 1\n"):
             config.write_text(defaults[:start] + section.replace("[7]\n", "[7]\n" + extra, 1) + defaults[end:])
             result = self.run_katzip("-7", "archive", "input.txt", env=environment)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -426,10 +528,10 @@ class KatzipTests(unittest.TestCase):
         self.assertLessEqual(candidates[1], candidates[0])
         self.assertEqual((self.root / "archive.zip").stat().st_size - candidates[1],
                          98 + 2 * len("input.txt"))
-        turtle = defaults.split("[9]\n", 1)[1].split("turtledeflate_", 1)[1]
-        turtle = "turtledeflate_" + turtle.split("zlib_after =", 1)[0]
+        turtle = defaults.split("[9]\n", 1)[1].split("--turtledeflate_", 1)[1]
+        turtle = "--turtledeflate_" + turtle.split("--zlib_after ", 1)[0]
         config.write_text(defaults[:start] +
-                          section.replace("[7]\n", "[7]\nlibdeflate_level = 1\n" + turtle, 1) +
+                          section.replace("[7]\n", "[7]\n--libdeflate_level 1\n" + turtle, 1) +
                           defaults[end:])
         result = self.run_katzip("-7", "archive", "input.txt", env=environment)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -447,7 +549,7 @@ class KatzipTests(unittest.TestCase):
         head, level_nine = defaults.split("[9]\n", 1)
         turtle_only = "\n".join(
             line for line in level_nine.splitlines()
-            if not line.startswith("zopfli_")
+            if not line.startswith("--zopfli_")
         ) + "\n"
         config.write_text(head + "[9]\n" + turtle_only)
         result = self.run_katzip("-9", "turtle", "input.txt", env=environment)
@@ -456,8 +558,8 @@ class KatzipTests(unittest.TestCase):
             self.assertEqual(archive.read("input.txt"), content)
         zlib_only = "\n".join(
             line for line in turtle_only.splitlines()
-            if not line.startswith("turtledeflate_")
-        ).replace("zlib_after = off", "zlib_after = 0") + "\n"
+            if not line.startswith("--turtledeflate_")
+        ).replace("--zlib_after off", "--zlib_after 0") + "\n"
         config.write_text(head + "[9]\n" + zlib_only)
         result = self.run_katzip("-9", "zlib", "input.txt", env=environment)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -471,7 +573,7 @@ class KatzipTests(unittest.TestCase):
         environment = dict(os.environ, KATZIP_INI=str(config))
         broken_configs = (
             defaults.replace("[2]", "bad = 1\n[2]", 1),
-            defaults + "[1]\nlibdeflate_level = 1",
+            defaults + "[1]\n--libdeflate_level 1",
         )
         for content in broken_configs:
             config.write_text(content)
@@ -482,6 +584,69 @@ class KatzipTests(unittest.TestCase):
             self.assertIn(b"invalid setting", result.stderr)
             self.assertFalse((self.root / "archive.zip").exists())
 
+    def test_selected_ini_section_and_cli_settings_share_syntax(self):
+        (self.root / "input.txt").write_text("repeat me " * 500)
+        ini = self.root / "settings.ini"
+        ini.write_text(
+            "[1]\n"
+            "--libdeflate_level 1\n"
+            "--zlib_after off\n"
+            "[2]\n"
+            "--invalid ignored even when very long " + "x" * 1000 + "\n"
+            "[7]\n"
+            "--zopfli_numiterations 1\n"
+            "--zlib_after off\n"
+        )
+        environment = dict(os.environ, KATZIP_INI=str(ini))
+        result = self.run_katzip(
+            "--libdeflate_level", "12", "first", "input.txt", "-1",
+            env=environment
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_katzip(
+            "second", "input.txt", "--libdeflate_level", "12", "-1",
+            env=environment
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "first.zip") as first:
+            with zipfile.ZipFile(self.root / "second.zip") as second:
+                self.assertEqual(first.read("input.txt"), second.read("input.txt"))
+                self.assertEqual(first.getinfo("input.txt").compress_size,
+                                 second.getinfo("input.txt").compress_size)
+        result = self.run_katzip(
+            "third", "input.txt", "--libdeflate_level", "13", "-1",
+            env=environment
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"invalid value", result.stderr)
+
+    def test_partial_group_ini_and_recursive_option(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / "deep.txt").write_text("deep " * 100)
+        ini = self.root / "settings.ini"
+        ini.write_text(
+            "[1]\n-r\n--zopfli_numiterations 1\n--zlib_after off\n"
+            "[2]\n--unknown setting\n"
+        )
+        environment = dict(os.environ, KATZIP_INI=str(ini))
+        result = self.run_katzip("archive", "@*.txt", "-1", env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as archive:
+            self.assertEqual(archive.namelist(), ["nested/deep.txt"])
+        result = self.run_katzip("archive", "@*.txt", "-2", env=environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"invalid setting", result.stderr)
+
+    def test_full_help_describes_compression_options(self):
+        result = self.run_katzip("archive", "--full-help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"--zopfli_noblocksplitlz", result.stdout)
+        self.assertIn(b"LZ77 token cutoff", result.stdout)
+        self.assertIn(b"--turtledeflate_b_block_splitter_push_split", result.stdout)
+        self.assertIn(b"--zlib_after SIZE", result.stdout)
+        self.assertFalse((self.root / "archive.zip").exists())
+
     def test_ini_search_order_and_automatic_generation(self):
         binary_dir = self.root / "bin"
         document_dir = self.root / "documents"
@@ -490,14 +655,14 @@ class KatzipTests(unittest.TestCase):
         shutil.copy2(PROGRAM, binary_dir / "katzip")
         (document_dir / "input.txt").write_text("Repeated input. " * 100)
         defaults = self.default_ini()
-        self.assertIn("[7]\nzopfli_numiterations = 13", defaults)
-        self.assertIn("[8]\nzopfli_numiterations = 60", defaults)
-        self.assertIn("[9]\nzopfli_numiterations = 60", defaults)
+        self.assertIn("[7]\n--zopfli_numiterations 13", defaults)
+        self.assertIn("[8]\n--zopfli_numiterations 60", defaults)
+        self.assertIn("[9]\n--zopfli_numiterations 60", defaults)
         executable_ini = binary_dir / "katzip.ini"
         current_ini = document_dir / "katzip.ini"
         executable_ini.write_text(defaults)
-        current_ini.write_text(defaults.replace("libdeflate_level = 1",
-                                                "libdeflate_level = 13", 1))
+        current_ini.write_text(defaults.replace("--libdeflate_level 1",
+                                                "--libdeflate_level 13", 1))
         environment = dict(os.environ)
         environment.pop("KATZIP_INI", None)
         environment["PATH"] = str(binary_dir) + os.pathsep + environment.get("PATH", "")

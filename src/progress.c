@@ -1,14 +1,54 @@
 #include "katzip_internal.h"
 
+/* UTF-8 continuation bytes do not occupy another terminal column. */
+static int name_columns(const char *name)
+{
+  const unsigned char *byte = (const unsigned char*)name;
+  int columns = 0;
+  while(*byte)
+  {
+    if((*byte & 0xc0) != 0x80)
+      ++columns;
+    ++byte;
+  }
+  return columns;
+}
+
+static void print_spaces(int count)
+{
+  while(count-- > 0)
+    fputc(' ', stderr);
+}
+
+static int print_name(const PROGRESS *progress)
+{
+  int columns = name_columns(progress->entry->name);
+  fputc('\r', stderr);
+  fputs(progress->entry->name, stderr);
+  print_spaces(progress->name_width - columns + 2);
+  return progress->name_width + 2;
+}
+
 static void print_progress_value(PROGRESS *progress, uint64_t percent)
 {
-  int width = fprintf(stderr, "\r%s %llu.%02llu%%",
-    progress->entry->name, (unsigned long long)(percent / 100),
+  int columns = print_name(progress);
+  columns += fprintf(stderr, "%llu.%02llu%%",
+    (unsigned long long)(percent / 100),
     (unsigned long long)(percent % 100));
-  int i;
-  for(i = width; i < progress->display_width; ++i)
-    fputc(' ', stderr);
-  progress->display_width = width;
+  print_spaces(progress->display_width - columns);
+  progress->display_width = columns;
+  fflush(stderr);
+}
+
+static void print_completed_value(PROGRESS *progress, uint64_t ratio)
+{
+  int columns = print_name(progress);
+  columns += fprintf(stderr, "%llu.%02llu%%",
+    (unsigned long long)(ratio / 100),
+    (unsigned long long)(ratio % 100));
+  print_spaces(progress->display_width - columns);
+  fputc('\n', stderr);
+  progress->display_width = 0;
   fflush(stderr);
 }
 
@@ -26,11 +66,14 @@ static double estimated_input_done(const PROGRESS *progress)
 
 static uint64_t progress_percent(PROGRESS *progress, int timer_tick)
 {
-  double done = estimated_input_done(progress);
+  double done = (double)progress->completed_work;
   double percent = 0;
-  if(progress->entry->expected_size)
-    percent = done * 10000 / progress->entry->expected_size;
-  if(percent > 9999)
+  if(!progress->parallel)
+    done += 6.0 * estimated_input_done(progress);
+  if(progress->total_work)
+    percent = done * 10000 / progress->total_work;
+  if(progress->entries_written < progress->entries_total &&
+    percent > 9999)
     percent = 9999;
   if((uint64_t)percent < progress->displayed_percent)
     percent = progress->displayed_percent;
@@ -99,6 +142,41 @@ int progress_init(PROGRESS *progress)
   return 0;
 }
 
+static uint64_t entry_weight(const ENTRY *entry)
+{
+  return entry->expected_size ? entry->expected_size : 1;
+}
+
+void progress_set_total(PROGRESS *progress, const ENTRY_LIST *list,
+  int parallel)
+{
+  size_t i;
+  pthread_mutex_lock(&progress->mutex);
+  progress->parallel = parallel;
+  progress->entries_total = list->count;
+  progress->total_work = 0;
+  progress->name_width = 0;
+  for(i = 0; i < list->count; ++i)
+  {
+    int width = name_columns(list->entries[i].name);
+    progress->total_work += 6 * entry_weight(&list->entries[i]);
+    if(width > progress->name_width)
+      progress->name_width = width;
+  }
+  pthread_mutex_unlock(&progress->mutex);
+}
+
+/* Each competing encoder contributes one share of its file's weight. */
+void progress_task_done(PROGRESS *progress, const ENTRY *entry,
+  int task_count)
+{
+  pthread_mutex_lock(&progress->mutex);
+  progress->completed_work += 6 * entry_weight(entry) / task_count;
+  if(progress->active)
+    show_progress(progress, 0);
+  pthread_mutex_unlock(&progress->mutex);
+}
+
 void progress_start(PROGRESS *progress, const ENTRY *entry,
   const turtledeflate_config_t *config)
 {
@@ -111,7 +189,6 @@ void progress_start(PROGRESS *progress, const ENTRY *entry,
   progress->pass = 0;
   progress->pass_done = 0;
   progress->pass_total = 0;
-  progress->displayed_percent = 0;
   progress->display_width = 0;
   progress->active = 1;
   show_progress(progress, 0);
@@ -121,6 +198,8 @@ void progress_start(PROGRESS *progress, const ENTRY *entry,
 
 void progress_block(PROGRESS *progress, uint32_t size)
 {
+  if(!progress)
+    return;
   pthread_mutex_lock(&progress->mutex);
   progress->block_size = size;
   progress->pass = 0;
@@ -129,6 +208,8 @@ void progress_block(PROGRESS *progress, uint32_t size)
 
 void progress_update(PROGRESS *progress, uint32_t done)
 {
+  if(!progress)
+    return;
   pthread_mutex_lock(&progress->mutex);
   progress->done = done;
   progress->block_size = 0;
@@ -138,6 +219,8 @@ void progress_update(PROGRESS *progress, uint32_t done)
 
 void progress_wait(PROGRESS *progress)
 {
+  if(!progress)
+    return;
   pthread_mutex_lock(&progress->mutex);
   progress->block_size = 1;
   pthread_mutex_unlock(&progress->mutex);
@@ -145,6 +228,8 @@ void progress_wait(PROGRESS *progress)
 
 void progress_callback(void *user, uint32_t pass, uint32_t completed, uint32_t total)
 {
+  if(!user)
+    return;
   PROGRESS *progress = (PROGRESS*)user;
   pthread_mutex_lock(&progress->mutex);
   progress->pass = pass;
@@ -153,22 +238,34 @@ void progress_callback(void *user, uint32_t pass, uint32_t completed, uint32_t t
   pthread_mutex_unlock(&progress->mutex);
 }
 
+static uint64_t compression_ratio(const ENTRY *entry)
+{
+  if(!entry->size)
+    return 0;
+  return (entry->compressed_size * 10000 + entry->size / 2) /
+    entry->size;
+}
+
 void progress_finish(PROGRESS *progress, int success)
 {
-  uint64_t percent;
+  uint64_t ratio;
   pthread_mutex_lock(&progress->mutex);
   progress->block_size = 0;
   progress->pass = 0;
   if(success)
   {
-    percent = progress->entry->size ?
-      (progress->entry->compressed_size * 10000 +
-        progress->entry->size / 2) / progress->entry->size : 0;
-    print_progress_value(progress, percent);
+    if(!progress->parallel)
+      progress->completed_work += 6 * entry_weight(progress->entry);
+    ++progress->entries_written;
+    progress->done = 0;
+    ratio = compression_ratio(progress->entry);
+    print_completed_value(progress, ratio);
   }
   else
+  {
     show_progress(progress, 0);
-  fputc('\n', stderr);
+    fputc('\n', stderr);
+  }
   progress->active = 0;
   pthread_cond_signal(&progress->condition);
   pthread_mutex_unlock(&progress->mutex);

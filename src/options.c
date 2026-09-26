@@ -12,6 +12,7 @@ static void print_help(FILE *stream)
     "  -1 ... -9   Compression level (default: -7).\n"
     "  -r          Search directories recursively.\n"
     "  -h, --help  Show this help.\n"
+    "  --full-help Show compression settings and this help.\n"
     "  --          Treat all following arguments as input names.\n"
     "\n"
     "Input:\n"
@@ -32,6 +33,69 @@ static void print_help(FILE *stream)
     "Environment:\n"
     "  KATZIP_INI  Path to a specific compression settings file.\n", stream);
 }
+
+static void print_full_help(void)
+{
+  static const char *ect_help[] = {
+    "LZ77 optimization passes",
+    "Reserved ECT preset; unused for raw Deflate",
+    "Byte cutoff for skipping dynamic Huffman blocks",
+    "Token cutoff for trying fixed Huffman blocks",
+    "Byte cutoff for block splitting",
+    "LZ77 token cutoff for block splitting",
+    "Candidate split positions per round",
+    "Huffman header search effort",
+    "Reuse the preceding pass's cost model",
+    "Cache matches between passes",
+    "ECT internal threading; only 0 is allowed",
+    "PNG tuning; only 0 is allowed for ZIP",
+    "Short-match replacement effort",
+    "Run block splitting a second time",
+    "Additional LZ77 cost-model refinement",
+    "Match length for greedy search",
+    "Estimate split cost with Shannon entropy",
+    "Optimize Huffman trees and block headers"
+  };
+  static const char *turtle_help[] = {
+    "Turtle effort; levels above 7 enable extra checks",
+    "Maximum source bytes per superblock",
+    "Maximum Deflate subblocks per superblock",
+    "Outer subblock partition passes",
+    "Inner split and merge attempts per pass",
+    "Candidate positions in coarse split search",
+    "Search radius around the best split candidate",
+    "Minimum range for sampled split search",
+    "Try an additional split when optimization stalls",
+    "Lowest initial fixed-point precision",
+    "Highest initial fixed-point precision",
+    "Number of initial precisions to sample",
+    "Diagnostic detail; 0 is quiet"
+  };
+  size_t i;
+  print_help(stdout);
+  fputs("\nCompression settings:\n"
+    "  The selected [1]...[9] INI section uses the same options as the\n"
+    "  command line. The section ends at the next section header.\n"
+    "  Command-line settings override the selected section. A compressor\n"
+    "  participates when any of its settings appears in that section or\n"
+    "  on the command line. Missing settings use compiled defaults.\n"
+    "  Multiple compressors compete; the smallest Deflate stream wins.\n"
+    "  Use -r in a section to enable recursive search.\n"
+    "\n"
+    "  --libdeflate_level N  libdeflate effort, 1..12.\n"
+    "  --zlib_after SIZE    Use zlib at or above SIZE; off disables it.\n"
+    "  --zlib_level N       zlib effort, 1..9.\n"
+    "  SIZE accepts B, KiB, MiB, GiB, or plain bytes.\n"
+    "\nECT Zopfli options:\n", stdout);
+  for(i = 0; i < ARRAY_N(ect_fields); ++i)
+    printf("  --zopfli_%s N (%d..%d): %s\n", ect_fields[i].name,
+      ect_fields[i].minimum, ect_fields[i].maximum, ect_help[i]);
+  fputs("\nTurtledeflate options:\n", stdout);
+  for(i = 0; i < ARRAY_N(config_fields); ++i)
+    printf("  --turtledeflate_%s N: %s\n", config_fields[i].name,
+      turtle_help[i]);
+}
+
 static int level_flag(const char *argument)
 {
   if(argument[0] != '-' || argument[1] < '1' ||
@@ -40,13 +104,73 @@ static int level_flag(const char *argument)
   return argument[1] - '0';
 }
 
-static int consume_level_or_unknown(const char *argument,
-  OPTIONS *options)
+/* Find the selected level before reading its INI section. */
+int scan_options(int argc, char **argv, OPTIONS *options)
 {
-  int level = level_flag(argument);
-  if(level)
+  int i;
+  int done = 0;
+  options->level = DEFAULT_LEVEL;
+  options->recursive = 0;
+  options->archive_arg = 1;
+  for(i = 1; i < argc; ++i)
   {
-    options->level = level;
+    int level;
+    if(done)
+      continue;
+    if(strcmp(argv[i], "--") == 0)
+    {
+      done = 1;
+      continue;
+    }
+    if(strcmp(argv[i], "-h") == 0 ||
+      strcmp(argv[i], "--help") == 0)
+    {
+      print_help(stdout);
+      return 1;
+    }
+    if(strcmp(argv[i], "--full-help") == 0)
+    {
+      print_full_help();
+      return 1;
+    }
+    level = level_flag(argv[i]);
+    if(level)
+      options->level = level;
+    if(config_option_known(argv[i]))
+      ++i;
+  }
+  return 0;
+}
+
+/* Return 0 for an input name, 1 for an option, -1 for an error. */
+static int consume_option(int argc, char **argv, int *index,
+  OPTIONS *options, COMPRESSION_CONFIG *config, int *done)
+{
+  const char *argument = argv[*index];
+  int level;
+  if(*done)
+    return 0;
+  if(strcmp(argument, "--") == 0)
+  {
+    *done = 1;
+    return 1;
+  }
+  if(strcmp(argument, "-r") == 0)
+  {
+    options->recursive = 1;
+    return 1;
+  }
+  level = level_flag(argument);
+  if(level)
+    return 1;
+  if(config_option_known(argument))
+  {
+    if(*index + 1 >= argc ||
+      apply_config_option(argument, argv[++*index], config))
+    {
+      fprintf(stderr, "katzip: invalid value for %s\n", argument);
+      return -1;
+    }
     return 1;
   }
   if(argument[0] != '-')
@@ -55,65 +179,23 @@ static int consume_level_or_unknown(const char *argument,
   return -1;
 }
 
-/* 0 means a positional argument; 1 means a consumed option. */
-static int consume_option(const char *argument, OPTIONS *options,
-  int *options_done)
-{
-  if(*options_done)
-    return 0;
-  if(strcmp(argument, "--") == 0)
-  {
-    *options_done = 1;
-    return 1;
-  }
-  if(strcmp(argument, "--help") == 0 || strcmp(argument, "-h") == 0)
-  {
-    print_help(stdout);
-    return 2;
-  }
-  if(strcmp(argument, "-r") == 0)
-  {
-    options->recursive = 1;
-    return 1;
-  }
-  return consume_level_or_unknown(argument, options);
-}
-
-static int parse_command_argument(char **argv, int index,
-  OPTIONS *options, int *options_done, int *next_position)
-{
-  int action = consume_option(argv[index], options, options_done);
-  if(action == 2)
-    return 1;
-  if(action < 0)
-    return -1;
-  if(!action)
-    argv[(*next_position)++] = argv[index];
-  return 0;
-}
-
-int parse_options(int argc, char **argv, OPTIONS *options)
+int parse_options(int argc, char **argv, OPTIONS *options,
+  COMPRESSION_CONFIG *config)
 {
   int next_position = 1;
-  int options_done = 0;
+  int done = 0;
   int i;
-  options->level = 7;
-  options->recursive = 0;
-  options->archive_arg = 1;
   for(i = 1; i < argc; ++i)
   {
-    int result = parse_command_argument(argv, i, options,
-      &options_done, &next_position);
-    if(result)
-      return result;
+    int action = consume_option(argc, argv, &i, options, config, &done);
+    if(action < 0)
+      return -1;
+    if(action == 0)
+      argv[next_position++] = argv[i];
   }
   options->argument_count = next_position;
-  if(next_position == options->archive_arg)
-  {
-    print_help(stderr);
-    return -1;
-  }
-  return 0;
+  if(next_position > options->archive_arg)
+    return 0;
+  print_help(stderr);
+  return -1;
 }
-
-/* Read masks before visiting explicit files or directories. */
