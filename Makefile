@@ -14,7 +14,10 @@ TURTLE_HEADERS = $(wildcard third_party/turtledeflate/inc/*.h third_party/turtle
 MINIZIP_FILES = $(wildcard third_party/minizip-ng/*.[ch] third_party/minizip-ng/CMakeLists.txt)
 ECT_FILES = $(wildcard third_party/ect/src/*.[ch] third_party/ect/src/zopfli/*.[ch] third_party/ect/src/zopfli/*.cpp)
 
-katzip: katzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
+KATZIP_SOURCES = $(wildcard src/*.c)
+KATZIP_HEADERS = $(wildcard src/*.h)
+
+katzip: $(KATZIP_SOURCES) $(KATZIP_HEADERS) $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch Makefile
 	@set -eu; \
 	build_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$build_dir"' EXIT; \
@@ -37,9 +40,13 @@ katzip: katzip.c $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) p
 	  $(CC) $(CFLAGS) -I"$$build_dir/inc" -I"$$build_dir/lib" \
 	    -c "$$build_dir/lib/$$source.c" -o "$$build_dir/$$source.o"; \
 	done; \
-	$(CC) $(CFLAGS) -pthread -I"$$build_dir/inc" -I"$$build_dir/lib" \
-	  -Ithird_party/minizip-ng -I"$$build_dir/minizip" -c katzip.c -o "$$build_dir/katzip.o"; \
-	$(CXX) -pthread -o $@ "$$build_dir/katzip.o" \
+	for source in $(KATZIP_SOURCES); do \
+	  object=$${source##*/}; object=$${object%.c}; \
+	  $(CC) $(CFLAGS) -pthread -I$(CURDIR) -I"$$build_dir/inc" -I"$$build_dir/lib" \
+	    -Ithird_party/minizip-ng -I"$$build_dir/minizip" \
+	    -c "$$source" -o "$$build_dir/katzip_$$object.o"; \
+	done; \
+	$(CXX) -pthread -o $@ "$$build_dir"/katzip_*.o \
 	  "$$build_dir/turtledeflate.o" "$$build_dir/turtledeflate_tree.o" \
 	  "$$build_dir/turtledeflate_block.o" "$$build_dir/turtledeflate_bitstream.o" \
 	  "$$build_dir"/ect_*.o "$$build_dir/minizip/libminizip-ng.a" -ldeflate -lz -lm

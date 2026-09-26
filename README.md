@@ -18,6 +18,10 @@ The build copies Turtledeflate into a temporary directory, applies
 files in `third_party/turtledeflate` stay untouched.
 Run `make test` to build and run the archive integration tests.
 
+The `src/` directory separates command-line parsing, input discovery,
+configuration, progress reporting, ZIP entries, and the compression engines.
+`src/archive.c` coordinates archive creation, validation, and publication.
+
 ## Use
 
 ```sh
@@ -52,7 +56,7 @@ For DEFLATE entries, ZIP header bits 1-2 mark levels 1-3 as Super Fast,
 the key and the compressor name are not stored in the archive. Stored entries
 leave the DEFLATE hint bits clear.
 
-Default compression settings are tables near the start of `katzip.c`. On the
+Default compression settings are tables in `src/config_defaults.c`. On the
 first archive run, katzip checks for `katzip.ini` in the current directory and
 then next to its executable, including when launched through `PATH`. If neither
 exists, katzip creates `katzip.ini` next to the executable. The working
