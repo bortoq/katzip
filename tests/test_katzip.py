@@ -6,6 +6,7 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -145,6 +146,13 @@ class KatzipTests(unittest.TestCase):
         with zipfile.ZipFile(self.root / "-archive.zip") as archive:
             self.assertEqual(archive.read("-dash.txt"), b"dash")
 
+        (self.root / "@literal.txt").write_text("literal")
+        result = self.run_katzip("-1", "literal", "--", "@literal.txt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "literal.zip") as archive:
+            self.assertEqual(archive.namelist(), ["@literal.txt"])
+            self.assertEqual(archive.read("@literal.txt"), b"literal")
+
         result = self.run_katzip("invalid", "one.txt", "-unknown")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"unknown option", result.stderr)
@@ -260,6 +268,24 @@ class KatzipTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(old.read_bytes(), b"previous archive")
+        self.assertEqual(list(self.root.glob("archive.zip.tmp.*")), [])
+
+    @unittest.skipIf(sys.platform != "linux" or
+                     PROGRAM.name.endswith(("-asan", "-tsan")),
+                     "LD_PRELOAD fault injection uses the regular Linux build")
+    def test_corrupt_payload_is_rejected_before_publish(self):
+        helper = pathlib.Path(__file__).with_name("corrupt_archive.c")
+        preload = self.root / "corrupt_archive.so"
+        subprocess.run(["cc", "-shared", "-fPIC", str(helper), "-ldl",
+                        "-o", str(preload)], check=True, capture_output=True)
+        archive = self.root / "archive.zip"
+        archive.write_bytes(b"previous archive")
+        (self.root / "input.txt").write_bytes(b"repeat this sentence\n" * 300)
+        environment = dict(os.environ, LD_PRELOAD=str(preload))
+        result = self.run_katzip("-1", "archive", "input.txt",
+                                 env=environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(archive.read_bytes(), b"previous archive")
         self.assertEqual(list(self.root.glob("archive.zip.tmp.*")), [])
 
     def test_interrupt_removes_temporary_archive(self):
@@ -380,6 +406,44 @@ class KatzipTests(unittest.TestCase):
             compressed = sum(item.compress_size for item in opened.infolist())
             self.assertEqual((self.root / "archive.zip").stat().st_size,
                              overhead + compressed)
+
+    @unittest.skipIf(sys.platform != "linux" or
+                     PROGRAM.name.endswith(("-asan", "-tsan")),
+                     "address-space limit is specific to the regular Linux build")
+    def test_parallel_turtle_respects_address_space_limit(self):
+        config = self.root / "limited.ini"
+        config.write_text("""[9]
+--turtledeflate_i_compression_level 7
+--turtledeflate_i_maximum_block_size 32768
+--turtledeflate_i_maximum_subblocks 4
+--turtledeflate_i_max_block_splitter_iterations 1
+--turtledeflate_i_max_internal_block_splitter_iterations 1
+--turtledeflate_i_block_splitter_num_points 3
+--turtledeflate_i_block_splitter_center_dist 1
+--turtledeflate_i_block_splitter_min_range_for_points 256
+--turtledeflate_b_block_splitter_push_split 0
+--turtledeflate_i_min_start_fp -2
+--turtledeflate_i_max_start_fp 2
+--turtledeflate_i_num_start_fp 2
+--zlib_after off
+--zlib_level 9
+""")
+        inputs = {f"part{i}.bin": bytes([i]) * 4096 for i in range(12)}
+        for name, content in inputs.items():
+            (self.root / name).write_bytes(content)
+
+        def limit_memory():
+            limit = 256 * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+        result = self.run_katzip(
+            "-9", "archive", *inputs, env=dict(os.environ, KATZIP_INI=str(config)),
+            preexec_fn=limit_memory, timeout=30 * TEST_TIMEOUT_SCALE
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(self.root / "archive.zip") as opened:
+            for name, content in inputs.items():
+                self.assertEqual(opened.read(name), content)
 
     def test_parallel_ect_files_keep_independent_state(self):
         inputs = {}

@@ -20,6 +20,7 @@ struct FILE_SLOT {
   int task_count;
   int completed;
   int zlib_only;
+  int turtle_block_size;
 };
 
 int prepare_slot(FILE_SLOT *slot, ENTRY *entry,

@@ -359,7 +359,7 @@ static int gather_masks(int argc, char **argv, const OPTIONS *options,
   int i;
   for(i = options->archive_arg + 1; i < argc; ++i)
   {
-    if(argv[i][0] != '@')
+    if(i >= options->literal_start || argv[i][0] != '@')
     {
       ++*source_count;
       continue;
@@ -380,7 +380,7 @@ static int add_source_arguments(ENTRY_LIST *list, int argc, char **argv,
   int i;
   for(i = options->archive_arg + 1; i < argc; ++i)
   {
-    if(argv[i][0] == '@')
+    if(i < options->literal_start && argv[i][0] == '@')
       continue;
     if(add_argument(list, argv[i], options->recursive, masks, mask_count))
       return -1;

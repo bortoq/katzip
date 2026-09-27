@@ -212,7 +212,46 @@ static int write_archive_entries(ARCHIVE_OUTPUT *output,
   return 0;
 }
 
-/* Check the exact metadata size and ask minizip-ng to read the result. */
+static int validate_archive_members(ARCHIVE_OUTPUT *output,
+  const ENTRY_LIST *list)
+{
+  unsigned char buffer[65536];
+  size_t i;
+  for(i = 0; i < list->count; ++i)
+  {
+    mz_zip_file *info = NULL;
+    uint64_t bytes = 0;
+    uint32_t crc = crc32(0L, Z_NULL, 0);
+    int32_t read;
+    int32_t status = i ? mz_zip_reader_goto_next_entry(output->reader) :
+      mz_zip_reader_goto_first_entry(output->reader);
+    if(status != MZ_OK ||
+      mz_zip_reader_entry_get_info(output->reader, &info) != MZ_OK ||
+      !info || info->filename_size != list->entries[i].name_len ||
+      memcmp(info->filename, list->entries[i].name,
+        list->entries[i].name_len) != 0 ||
+      info->uncompressed_size != list->entries[i].size ||
+      info->compressed_size < 0 ||
+      (uint64_t)info->compressed_size !=
+        list->entries[i].compressed_size ||
+      mz_zip_reader_entry_open(output->reader) != MZ_OK)
+      return -1;
+    while((read = mz_zip_reader_entry_read(output->reader,
+      buffer, sizeof(buffer))) > 0)
+    {
+      bytes += (uint32_t)read;
+      crc = crc32(crc, buffer, (uInt)read);
+    }
+    if(read < 0 || bytes != list->entries[i].size ||
+      crc != info->crc ||
+      mz_zip_reader_entry_close(output->reader) != MZ_OK)
+      return -1;
+  }
+  return mz_zip_reader_goto_next_entry(output->reader) ==
+    MZ_END_OF_LIST ? 0 : -1;
+}
+
+/* Check container size, member metadata, payloads and CRCs. */
 static int validate_archive(ARCHIVE_OUTPUT *output,
   const ENTRY_LIST *list)
 {
@@ -235,6 +274,11 @@ static int validate_archive(ARCHIVE_OUTPUT *output,
   output->reader = mz_zip_reader_create();
   if(!output->reader || mz_zip_reader_open_file(output->reader,
     output->temporary_path) != MZ_OK)
+  {
+    errno = EIO;
+    return -1;
+  }
+  if(validate_archive_members(output, list))
   {
     errno = EIO;
     return -1;
@@ -264,6 +308,38 @@ static int sync_archive_file(const char *path, mode_t mode)
   return result;
 }
 
+static int sync_parent_directory(const char *path)
+{
+  char *parent = strdup(path);
+  char *slash;
+  int directory;
+  int result;
+  int saved_error;
+  if(!parent)
+    return -1;
+  slash = strrchr(parent, '/');
+  if(!slash)
+    strcpy(parent, ".");
+  else if(slash == parent)
+    parent[1] = 0;
+  else
+    *slash = 0;
+  directory = open(parent, O_RDONLY | O_DIRECTORY);
+  free(parent);
+  if(directory < 0)
+    return -1;
+  result = fsync(directory);
+  saved_error = errno;
+  if(close(directory) && !result)
+  {
+    result = -1;
+    saved_error = errno;
+  }
+  if(result)
+    errno = saved_error;
+  return result;
+}
+
 /* Publish only a complete archive, preserving an existing output on error. */
 static int publish_archive(ARCHIVE_OUTPUT *output,
   const char *archive_path, mode_t mode)
@@ -273,7 +349,7 @@ static int publish_archive(ARCHIVE_OUTPUT *output,
   if(rename(output->temporary_path, archive_path))
     return -1;
   output->temporary_created = 0;
-  return 0;
+  return sync_parent_directory(archive_path);
 }
 
 static int initialize_archive_output(ARCHIVE_OUTPUT *output,
@@ -320,7 +396,7 @@ static void report_archive_error(const ARCHIVE_OUTPUT *output,
   const char *archive_path)
 {
   int error_number;
-  if(!output->temporary_created)
+  if(!output->temporary_path)
     return;
   error_number = errno ? errno : EIO;
   fprintf(stderr, "katzip: failed to write archive %s: %s\n",

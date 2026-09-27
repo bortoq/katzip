@@ -1,4 +1,5 @@
 #include "parallel_internal.h"
+#include <sys/resource.h>
 
 typedef struct {
   pthread_mutex_t mutex;
@@ -112,22 +113,94 @@ static int create_worker_threads(SCHEDULER *scheduler)
   return 0;
 }
 
-/* Reserve only part of currently available RAM for encoder buffers. */
+static uint64_t smaller_limit(uint64_t first, uint64_t second)
+{
+  return first < second ? first : second;
+}
+
+static uint64_t read_memory_value(const char *path)
+{
+  FILE *file = fopen(path, "r");
+  unsigned long long value;
+  int found;
+  if(!file)
+    return UINT64_MAX;
+  found = fscanf(file, "%llu", &value);
+  fclose(file);
+  return found == 1 ? (uint64_t)value : UINT64_MAX;
+}
+
+/* A cgroup may inherit its effective limit from any ancestor. */
+static uint64_t cgroup_memory_available(void)
+{
+  static const char root[] = "/sys/fs/cgroup";
+  FILE *file = fopen("/proc/self/cgroup", "r");
+  char *line = NULL;
+  char *path = NULL;
+  char *group;
+  char *slash;
+  size_t capacity = 0;
+  uint64_t available = UINT64_MAX;
+  if(!file)
+    return available;
+  if(getline(&line, &capacity, file) < 0 ||
+    strncmp(line, "0::/", 4) != 0)
+    goto done;
+  group = line + 3;
+  group[strcspn(group, "\n")] = 0;
+  path = malloc(sizeof(root) + strlen(group) +
+    sizeof("/memory.current"));
+  if(!path)
+    goto done;
+  for(;;)
+  {
+    uint64_t limit;
+    uint64_t used;
+    snprintf(path, sizeof(root) + strlen(group) +
+      sizeof("/memory.current"), "%s%s/memory.max", root, group);
+    limit = read_memory_value(path);
+    snprintf(path, sizeof(root) + strlen(group) +
+      sizeof("/memory.current"), "%s%s/memory.current", root, group);
+    used = read_memory_value(path);
+    if(limit != UINT64_MAX && used != UINT64_MAX)
+      available = smaller_limit(available,
+        used < limit ? limit - used : 0);
+    if(strcmp(group, "/") == 0)
+      break;
+    slash = strrchr(group, '/');
+    if(!slash)
+      break;
+    if(slash == group)
+      slash[1] = 0;
+    else
+      *slash = 0;
+  }
+done:
+  free(path);
+  free(line);
+  fclose(file);
+  return available;
+}
+
+/* Reserve only part of available RAM for encoder buffers. */
 static uint64_t compression_memory_budget(void)
 {
   uint64_t fallback = 512ULL * 1024 * 1024;
+  uint64_t available = UINT64_MAX;
+  struct rlimit address_space;
 #ifdef _SC_AVPHYS_PAGES
   long pages = sysconf(_SC_AVPHYS_PAGES);
   long page_size = sysconf(_SC_PAGESIZE);
   if(pages > 0 && page_size > 0 &&
     (uint64_t)pages <= UINT64_MAX / (uint64_t)page_size)
-  {
-    uint64_t budget = (uint64_t)pages * (uint64_t)page_size / 2;
-    return budget > 64ULL * 1024 * 1024 ?
-      budget : 64ULL * 1024 * 1024;
-  }
+    available = (uint64_t)pages * (uint64_t)page_size;
 #endif
-  return fallback;
+  available = smaller_limit(available, cgroup_memory_available());
+  if(getrlimit(RLIMIT_AS, &address_space) == 0 &&
+    address_space.rlim_cur != RLIM_INFINITY)
+    available = smaller_limit(available,
+      (uint64_t)address_space.rlim_cur);
+  return available == UINT64_MAX ? fallback : available / 2;
 }
 
 static int start_scheduler(SCHEDULER *scheduler, const ENTRY_LIST *list,
@@ -135,6 +208,7 @@ static int start_scheduler(SCHEDULER *scheduler, const ENTRY_LIST *list,
 {
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   size_t total_tasks = task_count(list, config);
+  uint64_t threads_by_memory;
   memset(scheduler, 0, sizeof(*scheduler));
   scheduler->config = config;
   scheduler->progress = progress;
@@ -143,8 +217,15 @@ static int start_scheduler(SCHEDULER *scheduler, const ENTRY_LIST *list,
     scheduler->thread_count = total_tasks;
   if(!scheduler->thread_count)
     return -1;
-  scheduler->capacity = scheduler->thread_count * 4;
   scheduler->memory_limit = compression_memory_budget();
+  /* Leave room for each worker's stack and allocator arena in addition
+   * to the encoder buffer budget. */
+  threads_by_memory = scheduler->memory_limit / (64 * 1048576ULL);
+  if(!threads_by_memory)
+    threads_by_memory = 1;
+  if(scheduler->thread_count > threads_by_memory)
+    scheduler->thread_count = (size_t)threads_by_memory;
+  scheduler->capacity = scheduler->thread_count * 4;
   scheduler->threads = calloc(scheduler->thread_count,
     sizeof(*scheduler->threads));
   scheduler->queue = calloc(scheduler->capacity,

@@ -21,13 +21,14 @@ SANITIZER_FLAGS ?=
 katzip-asan: SANITIZER_FLAGS = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 katzip-tsan: SANITIZER_FLAGS = -O1 -g -fsanitize=thread -fno-omit-frame-pointer
 
-katzip katzip-asan katzip-tsan: $(KATZIP_SOURCES) $(KATZIP_HEADERS) $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch patches/turtledeflate_bounds.patch patches/ect.patch Makefile
+katzip katzip-asan katzip-tsan: $(KATZIP_SOURCES) $(KATZIP_HEADERS) $(TURTLE_SRC) $(TURTLE_HEADERS) $(MINIZIP_FILES) $(ECT_FILES) patches/turtledeflate.patch patches/turtledeflate_bounds.patch patches/ect.patch patches/ect_alignment.patch Makefile
 	@set -eu; \
 	build_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$build_dir"' EXIT; \
 	cp -R third_party/turtledeflate/inc third_party/turtledeflate/lib "$$build_dir"/; \
 	cp -R third_party/ect/src "$$build_dir/ect"; \
 	git -C "$$build_dir/ect" apply "$(CURDIR)/patches/ect.patch"; \
+	git -C "$$build_dir/ect" apply "$(CURDIR)/patches/ect_alignment.patch"; \
 	git -C "$$build_dir" apply "$(CURDIR)/patches/turtledeflate.patch"; \
 	tr -d '\r' < "$$build_dir/lib/turtledeflate_block.c" \
 	  > "$$build_dir/turtledeflate_block.normalized.c"; \

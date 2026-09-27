@@ -67,10 +67,11 @@ contribute to the archive-wide estimate when they finish. libdeflate and ECT
 do not report progress within a compression pass, so intermediate values are
 estimates. See the [progress study](reseach.md#compression-progress-experiment).
 
-katzip writes a temporary archive, validates it, and replaces an existing
-output only after completion. Ctrl+C (SIGINT) and SIGTERM remove the
-incomplete temporary archive. Errors return a nonzero exit status. UTF-8 file
-names are marked as UTF-8 in ZIP headers.
+katzip writes a temporary archive, decompresses each entry to verify its
+CRC, and replaces an existing output only after completion. The output file
+and parent directory are synced before success is reported. Ctrl+C (SIGINT)
+and SIGTERM remove the incomplete temporary archive. Errors return a nonzero
+exit status. UTF-8 file names are marked as UTF-8 in ZIP headers.
 
 For DEFLATE entries, ZIP header bits 1–2 record a compression hint: levels
 1–3 are Super Fast, 4–6 Fast, 7–8 Normal, and 9 Maximum. The hint does not

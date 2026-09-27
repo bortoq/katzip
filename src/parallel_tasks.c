@@ -104,13 +104,17 @@ static void add_task(FILE_SLOT *slot, int engine)
   else if(engine == ECT_ENGINE)
     task->memory_cost = 8 * (uint64_t)slot->entry->expected_size + 1048576;
   else if(engine == TURTLE_ENGINE)
-    task->memory_cost = MAX_BLOCK_SIZE * 4;
+    /* Turtle allocates 259 uint16_t match lengths per source byte,
+     * plus four streams, two trellises and other working buffers. */
+    task->memory_cost =
+      768 * (uint64_t)slot->turtle_block_size + 8 * 1048576ULL;
   else
     task->memory_cost = 4 * 1048576;
 }
 
 static void choose_tasks(FILE_SLOT *slot, const COMPRESSION_CONFIG *config)
 {
+  slot->turtle_block_size = config->turtle.i_maximum_block_size;
   if((uint64_t)slot->entry->expected_size >= config->zlib_after)
   {
     slot->zlib_only = 1;

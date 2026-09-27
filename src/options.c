@@ -185,8 +185,11 @@ int parse_options(int argc, char **argv, OPTIONS *options,
   int next_position = 1;
   int done = 0;
   int i;
+  options->literal_start = INT32_MAX;
   for(i = 1; i < argc; ++i)
   {
+    if(!done && strcmp(argv[i], "--") == 0)
+      options->literal_start = next_position;
     int action = consume_option(argc, argv, &i, options, config, &done);
     if(action < 0)
       return -1;

@@ -137,6 +137,7 @@ typedef struct {
   int recursive;
   int archive_arg;
   int argument_count;
+  int literal_start;
 } OPTIONS;
 
 char *trim(char *text);

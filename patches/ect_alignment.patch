@@ -1,0 +1,232 @@
+diff --git a/zopfli/deflate.cpp b/zopfli/deflate.cpp
+index d5d1d74..0be9f03 100755
+--- a/zopfli/deflate.cpp
++++ b/zopfli/deflate.cpp
+@@ -29,6 +29,7 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
+ #include <assert.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <limits.h>
+ #include <math.h>
+ 
+@@ -52,6 +53,15 @@ static void AddBit(int bit,
+   *bp = (*bp + 1) & 7;
+ }
+ 
++#if defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)
++static void OrUnalignedU32(unsigned char* out, size_t pos, unsigned bits) {
++  unsigned value;
++  memcpy(&value, out + pos, sizeof(value));
++  value |= bits;
++  memcpy(out + pos, &value, sizeof(value));
++}
++#endif
++
+ static void AddBits(unsigned symbol, unsigned length,
+                     unsigned char* bp, unsigned char* out, size_t* outsize) {
+ //Needs:
+@@ -61,7 +71,7 @@ static void AddBits(unsigned symbol, unsigned length,
+ //As this code is not that much faster it should be ok to only enable it on x86 with MSVC, GCC and clang
+ #if defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)
+   //Length must be nonzero.
+-    *(unsigned*)(&(out[*outsize - (!!(*bp))])) |= (symbol << (*bp));
++    OrUnalignedU32(out, *outsize - (!!(*bp)), symbol << (*bp));
+     (*outsize) += ((*bp) + length - 1) / 8 + (!(*bp));
+     *bp = (((*bp) + length) & 7);
+ }
+@@ -72,7 +82,7 @@ static void AddBits2(unsigned symbol, unsigned length,
+   //Length may be zero.
+   unsigned pos = (*bits) >> 3;
+   unsigned char bitties = ((*bits) & 7);
+-  *(unsigned*)(&(out[pos])) |= (symbol << bitties);
++  OrUnalignedU32(out, pos, symbol << bitties);
+   (*bits) += length;
+ 
+ #else
+diff --git a/zopfli/lz77.c b/zopfli/lz77.c
+index 869efc0..362ce20 100755
+--- a/zopfli/lz77.c
++++ b/zopfli/lz77.c
+@@ -27,6 +27,19 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdint.h>
++
++static uint32_t ReadU32(const void* address) {
++  uint32_t value;
++  memcpy(&value, address, sizeof(value));
++  return value;
++}
++
++static uint64_t ReadU64(const void* address) {
++  uint64_t value;
++  memcpy(&value, address, sizeof(value));
++  return value;
++}
+ 
+ #ifdef __SSE4_2__
+ #include <nmmintrin.h>
+@@ -154,15 +167,15 @@ typedef struct
+ } LZ3HC_Data_Structure;
+ 
+ #ifdef CRC_INTRINSIC
+-static U32 LZ4HC_hashPtr(const void* ptr) { return CRC_INTRINSIC(0, *(unsigned*)ptr) >> (32-HASH_LOG); }
+-static U32 LZ4HC_hashPtr3(const void* ptr) { return CRC_INTRINSIC(0, (*(unsigned*)ptr) & 0xFFFFFF) >> (32-HASH_LOG3); }
++static U32 LZ4HC_hashPtr(const void* ptr) { return CRC_INTRINSIC(0, ReadU32(ptr)) >> (32-HASH_LOG); }
++static U32 LZ4HC_hashPtr3(const void* ptr) { return CRC_INTRINSIC(0, (ReadU32(ptr)) & 0xFFFFFF) >> (32-HASH_LOG3); }
+ #else
+ 
+ #define HASH_FUNCTION(i)       (((i) * 2654435761U) >> (32-HASH_LOG))
+ #define HASH_FUNCTION3(i)       (((i) * 2654435761U) >> (32-HASH_LOG3))
+ 
+-static U32 LZ4HC_hashPtr(const void* ptr) { return HASH_FUNCTION(*(unsigned*)ptr); }
+-static U32 LZ4HC_hashPtr3(const void* ptr) { return HASH_FUNCTION3((*(unsigned*)ptr) & 0xFFFFFF); }
++static U32 LZ4HC_hashPtr(const void* ptr) { return HASH_FUNCTION(ReadU32(ptr)); }
++static U32 LZ4HC_hashPtr3(const void* ptr) { return HASH_FUNCTION3((ReadU32(ptr)) & 0xFFFFFF); }
+ #endif
+ 
+ static void LZ4HC_init (LZ4HC_Data_Structure* hc4, const BYTE* start)
+@@ -244,13 +257,13 @@ static int LZ4HC_InsertAndFindBestMatch(LZ4HC_Data_Structure* hc4,   /* Index ta
+   LZ4HC_Insert(hc4, ip);
+   U32 matchIndex = HashTable[LZ4HC_hashPtr(ip)];
+   if(HashTable[LZ4HC_hashPtr(ip + ml - 3)] < (lowLimit + ml - 3)) {*matchpos = ip; return ml;}
+-  U32 start = *(unsigned*)ip;
+-  U32 end = *(unsigned*)(ip + ml - 3);
++  U32 start = ReadU32(ip);
++  U32 end = ReadU32(ip + ml - 3);
+ 
+   while ((matchIndex>=lowLimit) && nbAttempts)
+   {
+     match = base + matchIndex;
+-    if (*(unsigned*)(base2 + matchIndex) == end && *(unsigned*)(base + matchIndex) == start)
++    if (ReadU32(base2 + matchIndex) == end && ReadU32(base + matchIndex) == start)
+     {
+       size_t mlt = GetMatch(ip + 2, base + matchIndex + 2, iLimit, iLimit - 8) - ip;
+ 
+@@ -258,7 +271,7 @@ static int LZ4HC_InsertAndFindBestMatch(LZ4HC_Data_Structure* hc4,   /* Index ta
+         if (ml == ZOPFLI_MAX_MATCH){
+           return ZOPFLI_MAX_MATCH;
+         }
+-        end = *(unsigned*)(ip + ml - 3);
++        end = ReadU32(ip + ml - 3);
+         base2 = base + ml - 3;
+ 
+         if(HashTable[LZ4HC_hashPtr(ip + ml - 3)] < (lowLimit + ml - 3)) {return ml;}
+@@ -282,12 +295,12 @@ static int LZ4HC_InsertAndFindBestMatch3 (LZ3HC_Data_Structure* hc4,   /* Index
+   /* HC3 match finder */
+   LZ4HC_Insert3(hc4, ip);
+   U32 matchIndex = HashTable[LZ4HC_hashPtr3(ip)];
+-  unsigned val = (*(unsigned*)ip) & 0xFFFFFF;
++  unsigned val = (ReadU32(ip)) & 0xFFFFFF;
+ 
+   while ((matchIndex>=lowLimit))
+   {
+     const BYTE* match = base + matchIndex;
+-    if (((*(unsigned*)match) & 0xFFFFFF) == val) { *matchpos = match;  return 3;}
++    if (((ReadU32(match)) & 0xFFFFFF) == val) { *matchpos = match;  return 3;}
+     matchIndex -= chainTable[matchIndex & MAX_DISTANCE3];
+   }
+ 
+@@ -459,8 +472,8 @@ void ZopfliLZ77Counts(const unsigned short* litlens, const unsigned short* dists
+     const unsigned char* ipo = &distc[rstart];
+     while (ipo < distc + end)
+     {
+-      size_t c = *(size_t*)ipo; ipo += 8;
+-      size_t c1 = *(size_t*)ipo; ipo += 8;
++      uint64_t c = ReadU64(ipo); ipo += 8;
++      uint64_t c1 = ReadU64(ipo); ipo += 8;
+       d_count[(unsigned char) c     ]++;
+       d_count1[(unsigned char)(c>>8) ]++;
+       d_count2[(unsigned char)(c>>16)]++;
+@@ -494,8 +507,8 @@ void ZopfliLZ77Counts(const unsigned short* litlens, const unsigned short* dists
+     const unsigned short* ip = &litlens[rstart];
+     while (ip < litlens + end)
+     {
+-      size_t c = (*(size_t*)ip) & ANDLLS; ip += 4;
+-      size_t c1 = (*(size_t*)ip) & ANDLLS; ip += 4;
++      uint64_t c = ReadU64(ip) & ANDLLS; ip += 4;
++      uint64_t c1 = ReadU64(ip) & ANDLLS; ip += 4;
+ 
+       ll_count[(unsigned short) c     ]++;
+       ll_count1[(unsigned short)(c>>16) ]++;
+@@ -507,8 +520,8 @@ void ZopfliLZ77Counts(const unsigned short* litlens, const unsigned short* dists
+       ll_count2[(unsigned short)(c1>>32)]++;
+       ll_count3[       c1>>48 ]++;
+ 
+-      c = (*(size_t*)ip) & ANDLLS; ip += 4;
+-      c1 = (*(size_t*)ip) & ANDLLS; ip += 4;
++      c = ReadU64(ip) & ANDLLS; ip += 4;
++      c1 = ReadU64(ip) & ANDLLS; ip += 4;
+ 
+       ll_count[(unsigned short) c     ]++;
+       ll_count1[(unsigned short)(c>>16) ]++;
+diff --git a/zopfli/squeeze.c b/zopfli/squeeze.c
+index 6a8b466..3881d7d 100755
+--- a/zopfli/squeeze.c
++++ b/zopfli/squeeze.c
+@@ -24,6 +24,13 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
+ #include <math.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <stdint.h>
++
++static uint32_t ReadU32(const void* address) {
++  uint32_t value;
++  memcpy(&value, address, sizeof(value));
++  return value;
++}
+ #if _MSC_VER
+ #include <malloc.h>
+ #define alloca _alloca
+@@ -162,11 +169,11 @@ typedef struct
+ } LZ3HC_Data_Structure;
+ 
+ #ifdef CRC_INTRINSIC
+-static U32 LZ4HC_hashPtr3(const void* ptr) { return CRC_INTRINSIC(0, (*(unsigned*)ptr) & 0xFFFFFF) >> (32-HASH_LOG3); }
++static U32 LZ4HC_hashPtr3(const void* ptr) { return CRC_INTRINSIC(0, (ReadU32(ptr)) & 0xFFFFFF) >> (32-HASH_LOG3); }
+ #else
+ #define HASH_FUNCTION3(i)       (((i) * 2654435761U) >> (32-HASH_LOG3))
+ 
+-static U32 LZ4HC_hashPtr3(const void* ptr) { return HASH_FUNCTION3((*(unsigned*)ptr) & 0xFFFFFF); }
++static U32 LZ4HC_hashPtr3(const void* ptr) { return HASH_FUNCTION3((ReadU32(ptr)) & 0xFFFFFF); }
+ #endif
+ 
+ static void LZ4HC_init3 (LZ3HC_Data_Structure* hc4, const BYTE* start)
+@@ -232,7 +239,7 @@ static int LZ4HC_InsertAndFindBestMatch3 (LZ3HC_Data_Structure* hc4,   /* Index
+     else {
+       dsym = ZopfliGetDistSymbol(ip - match);
+     }
+-    if (dsym == last_dsym && (last_match == max_match || *(unsigned*)&ip[last_match - 3] != *(unsigned*)&match[last_match - 3])) {matchIndex -= chainTable[matchIndex & MAX_DISTANCE3]; continue;}
++    if (dsym == last_dsym && (last_match == max_match || ReadU32(&ip[last_match - 3]) != ReadU32(&match[last_match - 3]))) {matchIndex -= chainTable[matchIndex & MAX_DISTANCE3]; continue;}
+     size_t mlt = GetMatch(ip, match, iLimit, iLimit - 8) - ip;
+ 
+     if (likely(mlt >= 3)) {
+@@ -393,7 +400,7 @@ static void GetBestLengths2(const unsigned char* in, size_t instart, size_t inen
+     float newCost = costs[j] + literals[in[i]];
+     if (newCost < costs[j + 1]) {
+       costs[j + 1] = newCost;
+-      length_array[j + 1] = 1U + (in[i] << 24);
++      length_array[j + 1] = 1U + ((unsigned)in[i] << 24);
+     }
+   }
+ 
+@@ -664,7 +671,7 @@ static void GetBestLengths(const ZopfliOptions* options, const unsigned char* in
+     float newCost = costs[j] + literals[in[i]];
+     if (newCost < costs[j + 1]) {
+       costs[j + 1] = newCost;
+-      length_array[j + 1] = 1U + (in[i] << 24);
++      length_array[j + 1] = 1U + ((unsigned)in[i] << 24);
+     }
+ 
+     if (i == inend - ZOPFLI_MAX_MATCH - 1 && mfinexport & 2){
+@@ -743,7 +750,7 @@ static void GetBestLengthsultra2(const unsigned char* in, size_t instart, size_t
+     unsigned newCost = costs[j] + literals[in[i]];
+     if (newCost < costs[j + 1]) {
+       costs[j + 1] = newCost;
+-      length_array[j + 1] = 1U + (in[i] << 24);
++      length_array[j + 1] = 1U + ((unsigned)in[i] << 24);
+     }
+   }
+ 
