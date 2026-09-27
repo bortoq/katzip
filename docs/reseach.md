@@ -260,3 +260,100 @@ seconds. The original profile did not finish that set within a
 Zopfli settings and all upstream source files remained unchanged. The
 original Canterbury level 9 timing had only one run; these results do
 not establish a universal speed or compression ranking.
+
+## Level 9 density search method (TPE-SMBO)
+
+Target: minimize total DEFLATE bytes on 11 Canterbury files for `-9`,
+time cost ignored. `-9 = sum min(ECT, Turtle)` per file, so ECT
+(~14 live params) and Turtle (~11) are tuned separately, then merged.
+
+Method: Sequential Model-Based Optimization with TPE surrogate
+(Optuna/SMAC style): maintain `l(x)=p(x|y<best)`, `g(x)=p(x|y>=best)`,
+next point maximizes `l/g` (~Expected Improvement). History of
+`-7`/`-8` searches plus current `-9` is the warm-start design.
+Threshold params use log scale. Finalists are polished by greedy
+coordinate descent over 1-2 params to catch 10-50 byte gains the
+surrogate smooths over. Slow files (`ptt5`, `kennedy.xls`) screen
+bad points before full-corpus runs (multi-fidelity). Every ZIP
+member is byte-verified; INI SHA and per-file sizes are logged.
+
+Why TPE-SMBO: the objective is expensive black-box, non-convex,
+non-smooth, mixed integer/boolean with interactions. Standard
+GA/SA/CMA-ES need thousands of evaluations; BO needs ~10xD and
+natively handles discrete spaces. GP/CMA-ES assume continuous
+inputs; TPE/RF do not. This matches BBO Challenge 2020 and
+SMAC-BBOB findings favoring BO at small budgets for expensive
+functions.
+
+## Level 9 density search results (TPE-SMBO + coordinate descent)
+
+Corpus `/home/user/Downloads/cantrbry.zip`
+(`c44b686dfc137e74aba4db0540e5d6568cb09e270ba8f8411d2f9df24f39a1a6`),
+11 files, 2,810,784 bytes. Metric: total DEFLATE bytes, verified
+byte for byte with Python `zipfile`. Baseline `-9`: 667,751.
+
+1. Decomposition (isolated INIs): ECT-only 673,015 (~4 s),
+   Turtle-only 669,154 (~25 s). Combined = per-file `min()`.
+   Turtle won only `kennedy.xls` (-5,260) and `ptt5` (-4).
+2. ECT TPE search (Optuna, 60 trials, objective = 9 ECT-decided
+   files): best trial 53 reached 443,459 vs 443,711 (-252).
+   `zopfli_num >= 11` explodes the stream (~650 KB) and was
+   avoided by the sampler.
+3. Turtle full-effort profile (pre-speedup values: subblocks 512,
+   outer 30, internal 100, points 31, fp -6..5 x16): `kennedy.xls`
+   175,406 (-115), `ptt5` 48,488 (-31).
+4. Combined validation gave 667,186, better than the predicted
+   667,353: full Turtle also beats ECT on text files. Isolated
+   full-Turtle on 9 texts (443,295) showed ECT can only win
+   `grammar.lsp`, `fields.c`, `xargs.1`.
+5. Coordinate descent on those 3 files (43 probes, ~0.3 s each):
+   `zopfli_num 7->8`, `zopfli_reuse_costmodel 1->0`,
+   `zopfli_numiterations 203->600`. Objective 5,856 -> 5,849
+   (`fields.c` 2,998 -> 2,991, `grammar.lsp` held at 1,172).
+
+Final `-9` (all 11 files, `verify OK`): **DEFLATE 667,179**,
+ZIP 668,229, i.e. **-572 bytes vs the fast preset** and -9 bytes
+vs the former full-effort 667,188. ECT diff vs old preset:
+`numiterations 60->600`, `noblocksplit 800->1734`,
+`noblocksplitlz 100->54`, `num 9->8`, `reuse_costmodel 1->0`,
+`replaceCodes 1001->5963`, `twice 0->1`, `ultra 1->3`,
+`greed 258->182`. Turtle restored to full effort.
+`make test`: 35 tests OK.
+
+## Level 7 speed and density refinement
+
+After the level 8 refinement, level 7 was slower and larger on Canterbury.
+Following the earlier parameter searches, a coordinate sweep varied the
+number of LZ77 optimization passes and the minimum LZ77 token count for
+block splitting. A second sweep checked nearby split thresholds and the
+`num`, `greed`, and `searchext` settings. Every archive member was decoded
+and compared byte for byte with its source. The selected change is:
+
+```text
+--zopfli_noblocksplitlz 200 -> 2250
+```
+
+The final comparison used one warm-up and five timed runs per profile in
+shuffled order. The Canterbury corpus has the same 11 files as above. The
+holdout contains a 457,791-byte FB2, the then-current katzip executable,
+three project C files, and 100,000 deterministic pseudorandom bytes. A
+third set contains all project `src/*.c` files and `README.md`.
+
+| Set and profile | Median time | ZIP entry data bytes |
+| --- | ---: | ---: |
+| Canterbury: former level 7 | 0.941 s | 668,486 |
+| Canterbury: refined level 7 | 0.709 s | 668,277 |
+| Canterbury: level 8 | 0.851 s | 668,003 |
+| Holdout: former level 7 | 0.289 s | 406,360 |
+| Holdout: refined level 7 | 0.278 s | 406,494 |
+| Holdout: level 8 | 0.303 s | 406,205 |
+
+The source set produced 29,337 DEFLATE bytes under both level 7 profiles;
+level 8 produced 29,333. On Canterbury, the new level 7 saves 209 bytes
+and 0.232 seconds against the former level 7. It also finishes 0.142
+seconds before level 8, at a cost of 274 bytes. On the holdout, the new
+level 7 saves 0.011 seconds but adds 134 bytes against its former profile.
+These timings were measured in a later local session, so they should be
+compared within this table rather than with older benchmark timings.
+The holdout's random member was stored without DEFLATE, so its 100,000
+bytes are included in the entry-data totals.

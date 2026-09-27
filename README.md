@@ -54,15 +54,16 @@ creating a ZIP with Info-ZIP before optimizing it.
 | 7-Zip `-tzip -mx=9` | 0.419 | 674,217 | 672,771 | 23.94% |
 | Info-ZIP + ECT `-9 -zip` | 8.212 | 674,065 | 673,015 | 23.94% |
 | katzip `-6` | 0.061 | 698,170 | 697,120 | 24.80% |
-| katzip `-7` | 0.614 | 669,536 | 668,486 | 23.78% |
-| katzip `-8` | 0.562 | 669,053 | 668,003 | 23.77% |
-| katzip `-9` | 28.648 | 668,801 | 667,751 | 23.76% |
+| katzip `-7` | 0.709 | 669,327 | 668,277 | 23.78% |
+| katzip `-8` | 0.851 | 669,053 | 668,003 | 23.77% |
+| katzip `-9` | — | 668,229 | 667,179 | 23.74% |
 
-Times are medians of five runs, except katzip `-9`, which is the median
-of three runs. The tuned levels 7–9, 7-Zip, and ECT were measured on
-27 September 2026; other rows retain the 26 September measurements.
-The faster level 9 preset is 563 bytes larger than its former version
-but took about one fifteenth as long on this corpus.
+Times are medians of five runs. The level 7 and 8 rows use the later
+level 7 retest on 27 September 2026. Level 9's size is from the latest
+full-effort density search; its time was not measured. The 7-Zip and ECT
+rows use 27 September measurements; other rows retain the 26 September
+measurements. Times from different sessions should be compared only with
+care.
 
 The results describe this corpus and machine; they do not establish a ranking
 for other files. [Benchmark method and complete results](docs/benchmark_cantrbry.md)

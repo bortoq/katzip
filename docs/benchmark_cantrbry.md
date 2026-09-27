@@ -164,6 +164,27 @@ compression became about 15 times faster. ZIP overhead remained 1,050
 bytes. On the separate six-file set, the new profile produced a
 430,701-byte ZIP (430,091 DEFLATE bytes) in 3.228 seconds in one run.
 The original level 9 profile did not finish this secondary set within
-180 seconds, so its size there is unknown. The current `katzip.ini`
-has SHA-256
+180 seconds, so its size there is unknown. The `katzip.ini` used for
+this level 9 measurement had SHA-256
 `952e73adc8a20a243f9a09ac425d72d304d357402d18719f4b7e44e560addfdf`.
+
+## Refined level 7 preset (27 September 2026)
+
+A later [coordinate search](reseach.md#level-7-speed-and-density-refinement)
+changed level 7's `--zopfli_noblocksplitlz` from 200 to 2250. All other
+level 7 settings stayed the same. The 11 Canterbury members were verified
+byte for byte after each run. Each profile had one warm-up and five timed
+runs, in shuffled order.
+
+| Profile | Median wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Former katzip `-7` | 0.941 s | 668,486 | 669,536 |
+| Refined katzip `-7` | 0.709 s | 668,277 | 669,327 |
+| katzip `-8` | 0.851 s | 668,003 | 669,053 |
+
+The measured `-7` speed gain is 25% against its former preset and 17%
+against `-8` in this session. Level 8 still saves 274 DEFLATE bytes.
+The speed ordering differs from the earlier level 8 retest; the absolute
+timings vary with the machine's conditions. A separate six-file holdout
+also showed faster level 7, with a 134-byte size increase against its
+former preset. The full holdout comparison is in the research notes.
