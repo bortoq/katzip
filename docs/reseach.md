@@ -118,9 +118,10 @@ long ECT run time. Starting from the new level 7 preset, 266 distinct Zopfli
 configurations were measured. A sweep of `greed`, changes to iteration and
 block-splitting settings, and random combinations found none smaller than
 668,486 DEFLATE bytes on Canterbury. Several higher-effort configurations
-exceeded a 12-second screening limit. The selected level 8 therefore differs
-from level 7 only in `--zopfli_trystatic 300` instead of `0`. This adds a
-fixed-Huffman trial for small blocks.
+exceeded a 12-second screening limit. The first tuned level 8 therefore
+differed from level 7 only in `--zopfli_trystatic 300` instead of `0`.
+This added a fixed-Huffman
+trial for small blocks. A later search refined this preset below.
 
 Each method had one warm-up and five timed runs in shuffled order. Every ZIP
 member was checked against the input. The Canterbury files were the training
@@ -130,14 +131,14 @@ set; the secondary set was the six-file set described above.
 | --- | ---: | ---: | ---: |
 | Canterbury: selected `-7` | 0.638 s | 668,486 | 669,536 |
 | Canterbury: former `-8` | 4.373 s | 673,015 | 674,065 |
-| Canterbury: selected `-8` | 0.666 s | 668,486 | 669,536 |
+| Canterbury: first tuned `-8` | 0.666 s | 668,486 | 669,536 |
 | Canterbury: Info-ZIP + ECT | 8.212 s | 673,015 | 674,065 |
 | Secondary: selected `-7` | 0.215 s | 430,890 | 431,500 |
 | Secondary: former `-8` | 0.834 s | 430,091 | 430,701 |
-| Secondary: selected `-8` | 0.218 s | 430,789 | 431,399 |
+| Secondary: first tuned `-8` | 0.218 s | 430,789 | 431,399 |
 | Secondary: Info-ZIP + ECT | 1.806 s | 430,091 | 430,701 |
 
-The selected `-8` tied `-7` on Canterbury and saved 101 DEFLATE bytes on
+The first tuned `-8` tied `-7` on Canterbury and saved 101 DEFLATE bytes on
 the secondary set. It beat ECT in both size and time on Canterbury. On the
 secondary set it remained faster, but ECT compressed 698 bytes more densely.
 These results do not support a general claim that `-8` always beats ECT.
@@ -146,3 +147,56 @@ A competing Turtledeflate profile reduced the Canterbury stream to 668,286
 bytes, but took 22.583 s for the complete archive because `ptt5` was slow.
 Reducing Turtledeflate's block size did not remove that delay. That profile
 was rejected under the speed objective.
+
+## Zopfli level 8 refinement
+
+Applying ECT `-9 -zip` to the first tuned `-8` ZIP reduced its size from
+669,536 to 669,189 bytes. All 347 saved bytes came from DEFLATE streams;
+ZIP overhead was unchanged. Nine of the 11 members became smaller, with
+the largest changes in `sum` (171 bytes) and `plrabn12.txt` (60 bytes).
+This showed a concrete target for a new parameter search.
+
+The search compared member sizes as well as the corpus total. It swept
+individual options, then paired the number of optimization passes with
+the minimum LZ77 token count for block splitting. Nearby thresholds and
+other options were checked on Canterbury and on the six-file secondary
+set above. Candidates taking more than 8–12 seconds per run were excluded.
+An independent archive of the project's C sources and README provided a
+third check. No compiler or third-party source code changed.
+
+The interaction mattered: changing `--zopfli_numiterations` from 3 to 4
+alone increased Canterbury's DEFLATE size from 668,486 to 668,583 bytes.
+Changing only `--zopfli_noblocksplitlz` from 200 to 2250 reduced it to
+668,277 bytes. Changing both reduced it to **668,003 bytes**. Smaller
+threshold changes and additional option sweeps did not improve the combined
+result on both main data sets enough to justify a third changed option.
+The selected level 8 preset therefore retains `--zopfli_trystatic 300`
+and changes only these two further values:
+
+```text
+--zopfli_numiterations 4
+--zopfli_noblocksplitlz 2250
+```
+
+Final measurements used one warm-up and five timed runs per method in
+shuffled order. Every ZIP member was verified against its source. The
+medians and sizes were:
+
+| Data set and method | Time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Canterbury: level 7 | 0.629 s | 668,486 | 669,536 |
+| Canterbury: first tuned level 8 | 0.628 s | 668,486 | 669,536 |
+| Canterbury: refined level 8 | 0.562 s | 668,003 | 669,053 |
+| Secondary: level 7 | 0.203 s | 430,890 | 431,500 |
+| Secondary: first tuned level 8 | 0.213 s | 430,789 | 431,399 |
+| Secondary: refined level 8 | 0.222 s | 430,634 | 431,244 |
+
+The refined preset saves 483 DEFLATE bytes on Canterbury and 155 on the
+secondary set relative to the first tuned level 8. On a third set of C
+sources and README, it saved 4 bytes (29,288 versus 29,292). It also
+beats the ECT-optimized first level 8 ZIP on Canterbury by 136 bytes.
+Applying ECT again to the refined ZIP still saves 201 bytes, reaching
+668,852 bytes in a single 7.450-second run. Thus the search improved the
+one-pass result but did not eliminate all potential for later optimization.
+On the secondary set, the earlier ECT result remains 543 DEFLATE bytes
+smaller than refined level 8. These data do not establish a general optimum.

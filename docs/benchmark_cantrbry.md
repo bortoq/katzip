@@ -101,23 +101,44 @@ The INI used for this level 7 retest had SHA-256
 `b5080d5bdd3138a701c46f84347874800eb12155aaf1bae2a12ebc983bf12b91`.
 The subsequent level 8 update superseded that snapshot.
 
-## Updated level 8 preset (27 September 2026)
+## First level 8 preset (27 September 2026)
 
-Level 8 was tuned after level 7. The new preset uses the level 7 Zopfli
-settings, except `--zopfli_trystatic 300` replaces `0`. The test used the
-same extracted Canterbury files. Each method ran once to warm the system,
-then five timed runs in shuffled order. Every ZIP member was checked
-byte for byte. ECT time includes the Info-ZIP creation step.
+Level 8 was first tuned after level 7. This intermediate preset used the
+level 7 Zopfli settings, except `--zopfli_trystatic 300` replaced `0`.
+The test used the same extracted Canterbury files. Each method ran once
+to warm the system, then five timed runs in shuffled order. Every ZIP
+member was checked byte for byte. ECT time includes the Info-ZIP step.
 
 | Method | Median wall time | DEFLATE bytes | ZIP bytes |
 | --- | ---: | ---: | ---: |
 | Selected katzip `-7` | 0.638 s | 668,486 | 669,536 |
 | Former katzip `-8` | 4.373 s | 673,015 | 674,065 |
-| Selected katzip `-8` | 0.666 s | 668,486 | 669,536 |
+| First tuned katzip `-8` | 0.666 s | 668,486 | 669,536 |
 | Info-ZIP + ECT `-9 -zip` | 8.212 s | 673,015 | 674,065 |
 
-The two current katzip levels tied on this corpus. A separate six-file set
-is reported in [compression research](reseach.md#zopfli-level-8-preset-search).
-
-The current `katzip.ini`, containing both selected presets, has SHA-256
+The two katzip levels tied at this stage. The intermediate `katzip.ini`
+had SHA-256
 `26c19849399c9689e42148abc5715f1225797e2bedc928653fb2f5234fdcbcf6`.
+
+## Refined level 8 preset (27 September 2026)
+
+A [targeted search](reseach.md#zopfli-level-8-refinement) changed
+`--zopfli_numiterations` from 3 to 4 and `--zopfli_noblocksplitlz`
+from 200 to 2250. The same two data sets were tested with one warm-up
+and five timed runs per method, in shuffled order. Every member was
+compared with its source.
+
+| Data set and method | Median wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Canterbury: katzip `-7` | 0.629 s | 668,486 | 669,536 |
+| Canterbury: first tuned `-8` | 0.628 s | 668,486 | 669,536 |
+| Canterbury: refined `-8` | 0.562 s | 668,003 | 669,053 |
+| Secondary: katzip `-7` | 0.203 s | 430,890 | 431,500 |
+| Secondary: first tuned `-8` | 0.213 s | 430,789 | 431,399 |
+| Secondary: refined `-8` | 0.222 s | 430,634 | 431,244 |
+
+The refined `-8` ZIP is 136 bytes smaller than the 669,189-byte
+ECT-optimized first level 8 ZIP on Canterbury. Running ECT `-9 -zip` on the refined
+669,053-byte ZIP saved a further 201 bytes, producing 668,852 bytes in
+7.450 seconds in one run. The current `katzip.ini` has SHA-256
+`a167f712f0de5c0dc58adf9fd1de4b24e4b74eab063bb7ffc13a8d8573fd0a9b`.

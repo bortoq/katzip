@@ -684,7 +684,7 @@ class KatzipTests(unittest.TestCase):
         (document_dir / "input.txt").write_text("Repeated input. " * 100)
         defaults = self.default_ini()
         self.assertIn("[7]\n--zopfli_numiterations 3", defaults)
-        self.assertIn("[8]\n--zopfli_numiterations 3", defaults)
+        self.assertIn("[8]\n--zopfli_numiterations 4", defaults)
         self.assertIn("[9]\n--zopfli_numiterations 60", defaults)
         executable_ini = binary_dir / "katzip.ini"
         current_ini = document_dir / "katzip.ini"
