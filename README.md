@@ -56,12 +56,13 @@ creating a ZIP with Info-ZIP before optimizing it.
 | katzip `-6` | 0.061 | 698,170 | 697,120 | 24.80% |
 | katzip `-7` | 0.614 | 669,536 | 668,486 | 23.78% |
 | katzip `-8` | 0.562 | 669,053 | 668,003 | 23.77% |
-| katzip `-9` | 437.514 | 668,238 | 667,188 | 23.74% |
+| katzip `-9` | 28.648 | 668,801 | 667,751 | 23.76% |
 
-Times are medians of five runs, except katzip `-9`, which was run once.
-7-Zip, ECT, and katzip `-7/-8` were measured again on 27 September
-2026; the other rows retain the 26 September measurements. The refined
-level 8 preset is smaller than level 7 on this corpus.
+Times are medians of five runs, except katzip `-9`, which is the median
+of three runs. The tuned levels 7–9, 7-Zip, and ECT were measured on
+27 September 2026; other rows retain the 26 September measurements.
+The faster level 9 preset is 563 bytes larger than its former version
+but took about one fifteenth as long on this corpus.
 
 The results describe this corpus and machine; they do not establish a ranking
 for other files. [Benchmark method and complete results](docs/benchmark_cantrbry.md)

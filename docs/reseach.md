@@ -200,3 +200,63 @@ Applying ECT again to the refined ZIP still saves 201 bytes, reaching
 one-pass result but did not eliminate all potential for later optimization.
 On the secondary set, the earlier ECT result remains 543 DEFLATE bytes
 smaller than refined level 8. These data do not establish a general optimum.
+
+## Turtledeflate level 9 speed search
+
+The goal was to make level 9 much faster without adding much to the ZIP
+size. The original Canterbury result was 668,238 bytes in 437.514 seconds
+(one run). The 11 inputs are listed in the
+[benchmark](benchmark_cantrbry.md). ECT's Zopfli alone took 5.221 seconds
+and produced 673,015 DEFLATE bytes. Turtledeflate supplied most of the
+original level 9 size advantage, but its default block searches were costly.
+
+The search first used `kennedy.xls`, where Zopfli level 9 produced a
+180,781-byte stream and the original level 9 archive held 175,406 bytes.
+It screened 32 completed baseline and single-option profiles, followed
+by 26 nearby combinations. Runs longer than 15 seconds on that file
+were discarded. `ptt5`, the slowest
+Canterbury member, then screened the speed of the promising profiles.
+The final candidates were checked on all 11 files and on the separate
+six-file set. Every ZIP member was compared byte for byte with its input.
+
+The chosen profile keeps Turtledeflate effort 9 and a 1,000,000-byte
+superblock. It changes the remaining search settings to:
+
+```text
+--turtledeflate_i_maximum_subblocks 8
+--turtledeflate_i_max_block_splitter_iterations 1
+--turtledeflate_i_max_internal_block_splitter_iterations 8
+--turtledeflate_i_block_splitter_num_points 3
+--turtledeflate_i_block_splitter_center_dist 1
+--turtledeflate_i_block_splitter_min_range_for_points 256
+--turtledeflate_b_block_splitter_push_split 0
+--turtledeflate_i_min_start_fp -2
+--turtledeflate_i_max_start_fp 2
+--turtledeflate_i_num_start_fp 2
+```
+
+On `kennedy.xls`, reducing the minimum sampling range from 1,024 to 256
+made eight internal passes about as fast as the earlier two-pass profile.
+With effort 9, the chosen profile made a 175,521-byte stream in 4.694
+seconds. On `ptt5` it made a 48,519-byte stream in 26.901 seconds.
+An alternative with effort 7 and two outer splitting passes made a
+48,519-byte `ptt5` stream, but took 50.587 seconds on that file. Its
+Turtle-only Canterbury run took 52.356 seconds. Combining its member
+sizes with the measured Zopfli sizes would save just 13 ZIP bytes against
+the chosen competitive profile. The extra time was not justified by this
+small estimated gain.
+
+| Canterbury level 9 | Time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Original profile | 437.514 s (one run) | 667,188 | 668,238 |
+| Chosen profile | 28.648 s (median of three) | 667,751 | 668,801 |
+
+The chosen profile was 15.3 times faster in these measurements, while its
+ZIP was 563 bytes (0.084%) larger. The new size remains 252 bytes below
+level 8's 669,053-byte ZIP. Its ZIP overhead is unchanged at 1,050 bytes.
+On the separate six-file set it produced 430,091 DEFLATE bytes in 3.228
+seconds. The original profile did not finish that set within a
+180-second limit, so its compressed size there was not measured. ECT's
+Zopfli settings and all upstream source files remained unchanged. The
+original Canterbury level 9 timing had only one run; these results do
+not establish a universal speed or compression ranking.

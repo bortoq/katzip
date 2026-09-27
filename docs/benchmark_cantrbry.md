@@ -140,5 +140,30 @@ compared with its source.
 The refined `-8` ZIP is 136 bytes smaller than the 669,189-byte
 ECT-optimized first level 8 ZIP on Canterbury. Running ECT `-9 -zip` on the refined
 669,053-byte ZIP saved a further 201 bytes, producing 668,852 bytes in
-7.450 seconds in one run. The current `katzip.ini` has SHA-256
+7.450 seconds in one run. The `katzip.ini` used for this level 8
+measurement had SHA-256
 `a167f712f0de5c0dc58adf9fd1de4b24e4b74eab063bb7ffc13a8d8573fd0a9b`.
+
+## Faster level 9 preset (27 September 2026)
+
+A [Turtledeflate parameter search](reseach.md#turtledeflate-level-9-speed-search)
+reduced the time spent on level 9. ECT's Zopfli settings stayed the same;
+only the Turtledeflate profile changed. The original level 9 measurement
+above had one run. The faster profile had three runs, with each ZIP member
+verified against its source.
+
+| Method | Wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Original katzip `-9` | 437.514 s (one run) | 667,188 | 668,238 |
+| Faster katzip `-9` | 28.648 s (median of three) | 667,751 | 668,801 |
+| Refined katzip `-8` | 0.562 s (median of five) | 668,003 | 669,053 |
+
+The three new level 9 times were 28.530, 29.009, and 28.648 seconds.
+The ZIP grew by 563 bytes (0.084% of the original level 9 ZIP) while
+compression became about 15 times faster. ZIP overhead remained 1,050
+bytes. On the separate six-file set, the new profile produced a
+430,701-byte ZIP (430,091 DEFLATE bytes) in 3.228 seconds in one run.
+The original level 9 profile did not finish this secondary set within
+180 seconds, so its size there is unknown. The current `katzip.ini`
+has SHA-256
+`952e73adc8a20a243f9a09ac425d72d304d357402d18719f4b7e44e560addfdf`.

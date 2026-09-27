@@ -79,16 +79,16 @@ static const turtledeflate_config_t turtle_defaults[] = {
   {
     .i_compression_level = 9,
     .i_maximum_block_size = 1000000,
-    .i_maximum_subblocks = 512,
-    .i_max_block_splitter_iterations = 30,
-    .i_max_internal_block_splitter_iterations = 100,
-    .i_block_splitter_num_points = 31,
-    .i_block_splitter_center_dist = 8,
-    .i_block_splitter_min_range_for_points = 1024,
-    .b_block_splitter_push_split = true,
-    .i_min_start_fp = -6,
-    .i_max_start_fp = 5,
-    .i_num_start_fp = 16,
+    .i_maximum_subblocks = 8,
+    .i_max_block_splitter_iterations = 1,
+    .i_max_internal_block_splitter_iterations = 8,
+    .i_block_splitter_num_points = 3,
+    .i_block_splitter_center_dist = 1,
+    .i_block_splitter_min_range_for_points = 256,
+    .b_block_splitter_push_split = false,
+    .i_min_start_fp = -2,
+    .i_max_start_fp = 2,
+    .i_num_start_fp = 2,
     .i_verbose = 0
   }
 };

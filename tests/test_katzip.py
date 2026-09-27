@@ -465,7 +465,7 @@ class KatzipTests(unittest.TestCase):
         for key, replacement in (
             ("--turtledeflate_i_maximum_block_size 1000000",
              "--turtledeflate_i_maximum_block_size 1000001"),
-            ("--turtledeflate_i_min_start_fp -6",
+            ("--turtledeflate_i_min_start_fp -2",
              "--turtledeflate_i_min_start_fp -2147483648"),
         ):
             config.write_text(defaults.replace(key, replacement))
@@ -686,6 +686,10 @@ class KatzipTests(unittest.TestCase):
         self.assertIn("[7]\n--zopfli_numiterations 3", defaults)
         self.assertIn("[8]\n--zopfli_numiterations 4", defaults)
         self.assertIn("[9]\n--zopfli_numiterations 60", defaults)
+        self.assertIn("--turtledeflate_i_max_block_splitter_iterations 1",
+                      defaults)
+        self.assertIn("--turtledeflate_i_block_splitter_min_range_for_points 256",
+                      defaults)
         executable_ini = binary_dir / "katzip.ini"
         current_ini = document_dir / "katzip.ini"
         executable_ini.write_text(defaults)
