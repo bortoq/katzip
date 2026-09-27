@@ -493,13 +493,13 @@ class KatzipTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid setting", result.stderr)
         for replacement in ("--zopfli_numiterations 0", "--zopfli_numiterations 1001"):
-            config.write_text(defaults.replace("--zopfli_numiterations 13", replacement, 1))
+            config.write_text(defaults.replace("--zopfli_numiterations 3", replacement, 1))
             result = self.run_katzip(
                 "-7", "archive", "input.txt", env=environment
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"invalid setting", result.stderr)
-        config.write_text(defaults.replace("--zopfli_numiterations 13",
+        config.write_text(defaults.replace("--zopfli_numiterations 3",
                                            "--zopfli_numiterations 1", 1))
         result = self.run_katzip("-7", "archive", "input.txt", env=environment)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -683,8 +683,8 @@ class KatzipTests(unittest.TestCase):
         shutil.copy2(PROGRAM, binary_dir / "katzip")
         (document_dir / "input.txt").write_text("Repeated input. " * 100)
         defaults = self.default_ini()
-        self.assertIn("[7]\n--zopfli_numiterations 13", defaults)
-        self.assertIn("[8]\n--zopfli_numiterations 60", defaults)
+        self.assertIn("[7]\n--zopfli_numiterations 3", defaults)
+        self.assertIn("[8]\n--zopfli_numiterations 3", defaults)
         self.assertIn("[9]\n--zopfli_numiterations 60", defaults)
         executable_ini = binary_dir / "katzip.ini"
         current_ini = document_dir / "katzip.ini"

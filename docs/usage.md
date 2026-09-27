@@ -59,12 +59,13 @@ always making a smaller file.
 
 During compression, katzip shows the current file and an estimated
 archive-wide percentage with two decimal places. It refreshes about once per
-second and stays below 100% until all files have been written. File names, including UTF-8 names,
-are padded so the percentages align. After a file completes, its line shows `100 × compressed size / original size`; an empty
+second and stays below 100% until all files have been written. File names,
+including UTF-8 names, are padded so the percentages align. After a file
+completes, its line shows `100 × compressed size / original size`; an empty
 file shows 0.00%, and a stored file shows 100.00%. Parallel compressor tasks
 contribute to the archive-wide estimate when they finish. libdeflate and ECT
 do not report progress within a compression pass, so intermediate values are
-estimates. See the [progress study](progress-study.md).
+estimates. See the [progress study](reseach.md#compression-progress-experiment).
 
 katzip writes a temporary archive, validates it, and replaces an existing
 output only after completion. Ctrl+C (SIGINT) and SIGTERM remove the

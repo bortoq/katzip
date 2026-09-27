@@ -7,7 +7,7 @@ option and value per line. For example:
 
 ```ini
 [7]
---zopfli_numiterations 20
+--zopfli_numiterations 3
 --zlib_after off
 ```
 
@@ -88,7 +88,7 @@ for the corresponding implementation.
 | `--zopfli_numiterations` | Number of iterative LZ77 cost-model optimization passes. More passes take longer. |
 | `--zopfli_filter_style` | Reserved ECT preset value (0..3); the vendored raw Deflate encoder does not read it. |
 | `--zopfli_skipdynamic` | Byte-size cutoff: do not try a dynamic-Huffman block at or below this size. |
-| `--zopfli_trystatic` | Try a fixed-Huffman block below this token-count cutoff; should exceed skipdynamic. |
+| `--zopfli_trystatic` | Try a fixed-Huffman block below this token-count cutoff; 0 disables the trial. |
 | `--zopfli_noblocksplit` | Do not split a block when its source data has fewer than this many bytes. |
 | `--zopfli_noblocksplitlz` | Do not split a block when its LZ77 stream has fewer than this many tokens. |
 | `--zopfli_num` | Number of candidate split positions sampled in each block-splitting round. |

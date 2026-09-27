@@ -11,13 +11,13 @@
 /* Presets are the only source for both compression and generated INI files. */
 static const int fast_defaults[] = {1, 2, 3, 5, 6, 8};
 
-/* ECT modes 7 and 9, expanded from ZopfliInitOptions(mode, 0, 0). */
+/* Levels 7 and 8 are tuned; level 9 uses ECT mode 9 defaults. */
 static const ZopfliOptions ect_defaults[] = {
   {
-    .numiterations = 13,
+    .numiterations = 3,
     .filter_style = 1,
     .skipdynamic = 80,
-    .trystatic = 1800,
+    .trystatic = 0,
     .noblocksplit = 1000,
     .noblocksplitlz = 200,
     .num = 9,
@@ -27,30 +27,30 @@ static const ZopfliOptions ect_defaults[] = {
     .multithreading = 0,
     .isPNG = 0,
     .replaceCodes = 1001,
-    .twice = 0,
+    .twice = 1,
     .ultra = 1,
-    .greed = 258,
-    .entropysplit = 0,
+    .greed = 48,
+    .entropysplit = 1,
     .advanced = 1
   },
   {
-    .numiterations = 60,
-    .filter_style = 3,
+    .numiterations = 3,
+    .filter_style = 1,
     .skipdynamic = 80,
-    .trystatic = 3000,
-    .noblocksplit = 800,
-    .noblocksplitlz = 100,
+    .trystatic = 300,
+    .noblocksplit = 1000,
+    .noblocksplitlz = 200,
     .num = 9,
-    .searchext = 2,
+    .searchext = 1,
     .reuse_costmodel = 1,
     .useCache = 1,
     .multithreading = 0,
     .isPNG = 0,
     .replaceCodes = 1001,
-    .twice = 0,
+    .twice = 1,
     .ultra = 1,
-    .greed = 258,
-    .entropysplit = 0,
+    .greed = 48,
+    .entropysplit = 1,
     .advanced = 1
   },
   {

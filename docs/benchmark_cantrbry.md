@@ -19,15 +19,17 @@ the 64 MiB zlib threshold in the default presets.
 
 The following commands show the measured operations. `OUT` is a new ZIP
 path and `FILES` is the ordered list of the 11 extracted file names.
-The commands ran from the extraction directory.
+The commands ran from the extraction directory. For the original katzip
+rows, set `PRESET_INI` to a copy of the historical INI from commit
+`aacf96f`. The current INI contains the updated level 7 and 8 presets.
 
 ```sh
 zip -q -9 "$OUT" "${FILES[@]}"
 7z a -bd -bso0 -bsp0 -tzip -mx=9 -mm=Deflate "$OUT" "${FILES[@]}"
 zip -q -9 "$OUT" "${FILES[@]}"; ect -quiet -9 -zip "$OUT"
-KATZIP_INI=/home/user/work/katzip/katzip.ini katzip -6 "$OUT" "${FILES[@]}"
-KATZIP_INI=/home/user/work/katzip/katzip.ini katzip -7 "$OUT" "${FILES[@]}"
-KATZIP_INI=/home/user/work/katzip/katzip.ini katzip -9 "$OUT" "${FILES[@]}"
+KATZIP_INI="$PRESET_INI" katzip -6 "$OUT" "${FILES[@]}"
+KATZIP_INI="$PRESET_INI" katzip -7 "$OUT" "${FILES[@]}"
+KATZIP_INI="$PRESET_INI" katzip -9 "$OUT" "${FILES[@]}"
 ```
 
 Wall time was measured around each process invocation with Python's
@@ -40,7 +42,7 @@ excluded. Every output was opened with Python's `zipfile`, and every member
 was compared byte for byte with its extracted source. All 11 members used
 DEFLATE in every output; none was stored without compression.
 
-## Results
+## Original results (26 September 2026)
 
 `DEFLATE bytes` is the sum of the 11 compressed member sizes and excludes
 ZIP headers and the directory. `DEFLATE / input` is that sum divided by
@@ -74,3 +76,48 @@ ZIP was 152 bytes larger because it wrote more container metadata. katzip
 `-9` produced the smallest ZIP, 5,827 bytes smaller than the ECT result,
 at much greater cost in time. These observations apply to this corpus and
 machine. The single katzip `-9` timing has no measured run-to-run range.
+
+## Updated level 7 preset (27 September 2026)
+
+The original table above records the former level 7 preset. A later local
+[parameter search](reseach.md#zopfli-level-7-preset-search) selected a new
+preset. The same Canterbury files were used for a new comparison. Each method
+ran once to warm the machine, then five timed runs in shuffled order.
+All output members were checked byte for byte against their inputs.
+
+| Method | Median wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| 7-Zip `-tzip -mx=9` | 0.419 s | 672,771 | 674,217 |
+| Former katzip `-7` | 1.783 s | 677,018 | 678,068 |
+| Selected katzip `-7` | 0.614 s | 668,486 | 669,536 |
+
+The selected preset used `--zopfli_numiterations 3`,
+`--zopfli_trystatic 0`, `--zopfli_twice 1`,
+`--zopfli_greed 48`, and `--zopfli_entropysplit 1`.
+All other level 7 settings stayed as before. The DEFLATE ratio for the
+selected preset was 23.78% of the 2,810,784 input bytes.
+
+The INI used for this level 7 retest had SHA-256
+`b5080d5bdd3138a701c46f84347874800eb12155aaf1bae2a12ebc983bf12b91`.
+The subsequent level 8 update superseded that snapshot.
+
+## Updated level 8 preset (27 September 2026)
+
+Level 8 was tuned after level 7. The new preset uses the level 7 Zopfli
+settings, except `--zopfli_trystatic 300` replaces `0`. The test used the
+same extracted Canterbury files. Each method ran once to warm the system,
+then five timed runs in shuffled order. Every ZIP member was checked
+byte for byte. ECT time includes the Info-ZIP creation step.
+
+| Method | Median wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Selected katzip `-7` | 0.638 s | 668,486 | 669,536 |
+| Former katzip `-8` | 4.373 s | 673,015 | 674,065 |
+| Selected katzip `-8` | 0.666 s | 668,486 | 669,536 |
+| Info-ZIP + ECT `-9 -zip` | 8.212 s | 673,015 | 674,065 |
+
+The two current katzip levels tied on this corpus. A separate six-file set
+is reported in [compression research](reseach.md#zopfli-level-8-preset-search).
+
+The current `katzip.ini`, containing both selected presets, has SHA-256
+`26c19849399c9689e42148abc5715f1225797e2bedc928653fb2f5234fdcbcf6`.
