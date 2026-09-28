@@ -357,3 +357,42 @@ These timings were measured in a later local session, so they should be
 compared within this table rather than with older benchmark timings.
 The holdout's random member was stored without DEFLATE, so its 100,000
 bytes are included in the entry-data totals.
+
+## Level 8 FB2 density search
+
+The target was twelve FB2 files from
+`/home/user/Downloads/lem/СТРУГАЦКИЕ/собрание сочинений/2/`, totaling
+26,939,192 source bytes. Each file was a separate ZIP member. The reference
+was Info-ZIP `zip -9` followed by ECT `-9 -zip`. Candidate ZIPs were
+decompressed and compared byte for byte with all source files. Canterbury
+was checked during selection to limit regressions outside the FB2 set.
+
+Single-option trials and combinations varied LZ77 passes, cost-model reuse,
+block-splitting thresholds, and ECT's higher-effort options. The full ECT
+level 9 option shape improved the FB2 result, but took about 30 seconds on
+Canterbury and added more than 4,000 DEFLATE bytes, almost all from
+`kennedy.xls`. Disabling cost-model reuse similarly made `kennedy.xls`
+larger. The chosen profile retains the other level 8 options and changes:
+
+```text
+--zopfli_numiterations 4 -> 12
+--zopfli_noblocksplitlz 2250 -> 3300
+```
+
+Final katzip times are medians of three shuffled runs; the ECT time is the
+median of two runs and includes the initial Info-ZIP step. Every archive
+was byte-verified. `DEFLATE bytes` excludes ZIP metadata.
+
+| Data set and method | Time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| FB2: former level 8 | 3.770 s | 7,345,383 | 7,346,443 |
+| FB2: selected level 8 | 6.387 s | 7,334,906 | 7,335,966 |
+| FB2: Info-ZIP + ECT `-9` | 62.5 s | 7,337,409 | 7,338,469 |
+| Canterbury: former level 8 | 0.649 s | 668,003 | 669,053 |
+| Canterbury: selected level 8 | 1.359 s | 668,115 | 669,165 |
+
+On FB2, the selected level 8 saves 10,477 DEFLATE bytes against the former
+preset and 2,503 against ECT. Canterbury adds 112 bytes (0.017%) and takes
+about twice as long as the former level 8. The FB2 gain and Canterbury cost
+were judged acceptable for a denser level 8 preset; neither data set proves
+that the profile is best for other file types.

@@ -188,3 +188,20 @@ The speed ordering differs from the earlier level 8 retest; the absolute
 timings vary with the machine's conditions. A separate six-file holdout
 also showed faster level 7, with a 134-byte size increase against its
 former preset. The full holdout comparison is in the research notes.
+
+## Level 8 FB2-tuned preset (28 September 2026)
+
+A later [FB2 density search](reseach.md#level-8-fb2-density-search) changed
+level 8's `--zopfli_numiterations` from 4 to 12 and
+`--zopfli_noblocksplitlz` from 2250 to 3300. The Canterbury corpus was
+checked during selection. Both presets were measured in shuffled order,
+three times each. Every ZIP member was decoded and compared with its source.
+
+| Profile | Median wall time | DEFLATE bytes | ZIP bytes |
+| --- | ---: | ---: | ---: |
+| Former katzip `-8` | 0.649 s | 668,003 | 669,053 |
+| New katzip `-8` | 1.359 s | 668,115 | 669,165 |
+
+The new preset adds 112 bytes of DEFLATE data (0.017%) and takes about twice
+as long on this corpus. Its FB2 ZIP is 2,503 bytes smaller than ECT `-9`
+and finishes about ten times faster in the same benchmark session.

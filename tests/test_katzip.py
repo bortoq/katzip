@@ -749,7 +749,8 @@ class KatzipTests(unittest.TestCase):
         defaults = self.default_ini()
         self.assertIn("[7]\n--zopfli_numiterations 3", defaults)
         self.assertIn("--zopfli_noblocksplitlz 2250", defaults)
-        self.assertIn("[8]\n--zopfli_numiterations 4", defaults)
+        self.assertIn("[8]\n--zopfli_numiterations 12", defaults)
+        self.assertIn("--zopfli_noblocksplitlz 3300", defaults)
         self.assertIn("[9]\n--zopfli_numiterations 600", defaults)
         self.assertIn("--turtledeflate_i_max_block_splitter_iterations 30",
                       defaults)

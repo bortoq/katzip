@@ -55,19 +55,37 @@ creating a ZIP with Info-ZIP before optimizing it.
 | Info-ZIP + ECT `-9 -zip` | 8.212 | 674,065 | 673,015 | 23.94% |
 | katzip `-6` | 0.061 | 698,170 | 697,120 | 24.80% |
 | katzip `-7` | 0.709 | 669,327 | 668,277 | 23.78% |
-| katzip `-8` | 0.851 | 669,053 | 668,003 | 23.77% |
+| katzip `-8` | 1.359 | 669,165 | 668,115 | 23.77% |
 | katzip `-9` | — | 668,229 | 667,179 | 23.74% |
 
-Times are medians of five runs. The level 7 and 8 rows use the later
-level 7 retest on 27 September 2026. Level 9's size is from the latest
-full-effort density search; its time was not measured. The 7-Zip and ECT
-rows use 27 September measurements; other rows retain the 26 September
-measurements. Times from different sessions should be compared only with
-care.
+The new level 8 row is the median of three runs on 28 September 2026. It
+adds 112 bytes and takes longer than the previous level 8 preset on this
+corpus (669,053 bytes, 0.649 s in the same session). The level 7 time is
+from 27 September. Level 9's size is from the latest full-effort density
+search; its time was not measured. The 7-Zip and ECT rows use 27 September
+measurements; other rows retain the 26 September measurements. Times from
+different sessions should be compared only with care.
 
-The results describe this corpus and machine; they do not establish a ranking
-for other files. [Benchmark method and complete results](docs/benchmark_cantrbry.md)
-include commands, repetitions, and file checks.
+The level 8 update was tuned on twelve FB2 files from a collected edition
+of the Strugatsky brothers (26,939,192 input bytes). Each file was stored
+as a separate ZIP entry and checked byte for byte after extraction. ECT's
+time includes creating the initial ZIP with Info-ZIP.
+
+| Method | Time (s) | ZIP (bytes) | DEFLATE (bytes) |
+| --- | ---: | ---: | ---: |
+| Former katzip `-8` | 3.770 | 7,346,443 | 7,345,383 |
+| New katzip `-8` | 6.387 | 7,335,966 | 7,334,906 |
+| Info-ZIP + ECT `-9 -zip` | 62.5 | 7,338,469 | 7,337,409 |
+
+The katzip times are medians of three shuffled runs; ECT is the median of
+two runs. The new preset saves 10,477 DEFLATE bytes against the former
+level 8 and 2,503 bytes against ECT on these files. It uses more time than
+the former level 8 but remains about ten times faster than ECT here.
+
+These results describe the tested files and machine; they do not establish a
+ranking for other data. See the [Canterbury benchmark](docs/benchmark_cantrbry.md)
+and [FB2 tuning notes](docs/reseach.md#level-8-fb2-density-search) for methods
+and detailed results.
 
 ## Further reading
 

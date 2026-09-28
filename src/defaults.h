@@ -34,12 +34,12 @@ static const ZopfliOptions ect_defaults[] = {
     .advanced = 1
   },
   {
-    .numiterations = 4,
+    .numiterations = 12,
     .filter_style = 1,
     .skipdynamic = 80,
     .trystatic = 300,
     .noblocksplit = 1000,
-    .noblocksplitlz = 2250,
+    .noblocksplitlz = 3300,
     .num = 9,
     .searchext = 1,
     .reuse_costmodel = 1,
